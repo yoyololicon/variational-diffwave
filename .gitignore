@@ -1,0 +1,4 @@
+*.pyc
+*tfevents.*
+*.pt
+*.pth

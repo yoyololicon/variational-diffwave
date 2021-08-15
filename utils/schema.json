@@ -1,0 +1,124 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "definitions": {
+        "instance": {
+            "type": "object",
+            "properties": {
+                "type": {
+                    "type": "string"
+                },
+                "args": {
+                    "type": "object"
+                }
+            },
+            "required": [
+                "type",
+                "args"
+            ]
+        }
+    },
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string"
+        },
+        "arch": {
+            "$ref": "#/definitions/instance"
+        },
+        "dataset": {
+            "$ref": "#/definitions/instance"
+        },
+        "optimizer": {
+            "$ref": "#/definitions/instance"
+        },
+        "lr_scheduler": {
+            "$ref": "#/definitions/instance"
+        },
+        "data_loader": {
+            "type": "object",
+            "properties": {
+                "batch_size": {
+                    "type": "integer"
+                },
+                "shuffle": {
+                    "type": "boolean"
+                }
+            },
+            "required": [
+                "batch_size",
+                "shuffle"
+            ]
+        },
+        "trainer": {
+            "type": "object",
+            "properties": {
+                "save_dir": {
+                    "type": "string"
+                },
+                "log_dir": {
+                    "type": "string"
+                },
+                "eval_file": {
+                    "type": "string"
+                },
+                "cum_steps": {
+                    "type": "integer"
+                },
+                "amp_enabled": {
+                    "type": "boolean"
+                },
+                "n_fft": {
+                    "type": "integer"
+                },
+                "hop_length": {
+                    "type": "integer"
+                },
+                "n_mels": {
+                    "type": "integer"
+                },
+                "sr": {
+                    "type": "integer"
+                },
+                "eval_interval": {
+                    "type": "integer"
+                },
+                "train_T": {
+                    "type": "integer"
+                },
+                "eval_T": {
+                    "type": "integer"
+                },
+                "extra_monitor": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            },
+            "required": [
+                "save_dir",
+                "log_dir",
+                "eval_file",
+                "cum_steps",
+                "eval_interval",
+                "amp_enabled",
+                "n_fft",
+                "hop_length",
+                "n_mels",
+                "sr",
+                "train_T",
+                "eval_T",
+                "extra_monitor"
+            ]
+        }
+    },
+    "required": [
+        "name",
+        "arch",
+        "dataset",
+        "optimizer",
+        "lr_scheduler",
+        "data_loader",
+        "trainer"
+    ]
+}

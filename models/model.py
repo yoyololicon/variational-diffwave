@@ -36,7 +36,7 @@ class DiffusionEmbedding(nn.Module):
     def __init__(self, max_steps):
         super().__init__()
         self.register_buffer('embedding', self._build_embedding(
-            max_steps), persistent=False)
+            max_steps + 1), persistent=False)
         self.projection1 = nn.Linear(128, 512)
         self.projection2 = nn.Linear(512, 512)
 
@@ -52,11 +52,12 @@ class DiffusionEmbedding(nn.Module):
         return x
 
     def _lerp_embedding(self, t):
+        t = t * (self.embedding.shape[0] - 1)
         low_idx = torch.floor(t).long()
         high_idx = torch.ceil(t).long()
         low = self.embedding[low_idx]
         high = self.embedding[high_idx]
-        return low + (high - low) * (t - low_idx)
+        return low + (high - low) * (t - low_idx)[:, None]
 
     def _build_embedding(self, max_steps):
         steps = torch.arange(max_steps).unsqueeze(1)  # [T,1]
@@ -71,11 +72,11 @@ class SpectrogramUpsampler(nn.Module):
     def __init__(self):
         super().__init__()
         self.convs = nn.Sequential(
-            nn.ConvTranspose2d(1, 1, [3, 32], stride=[
-                1, 16], padding=[1, 8]),
+            nn.ConvTranspose2d(1, 1, [3, 33], stride=[
+                1, 16], padding=[1, 16]),
             nn.LeakyReLU(0.4, inplace=True),
-            nn.ConvTranspose2d(1, 1,  [3, 32], stride=[
-                1, 16], padding=[1, 8]),
+            nn.ConvTranspose2d(1, 1,  [3, 33], stride=[
+                1, 16], padding=[1, 16]),
             nn.LeakyReLU(0.4, inplace=True)
         )
         self.hop_size = 256
@@ -112,11 +113,11 @@ class ResidualBlock(nn.Module):
 
 class DiffWave(nn.Module):
     def __init__(self,
-                 res_channels: int,
-                 T: int,
-                 n_mels: int,
-                 layers: int,
-                 cycle_length: int
+                 res_channels: int = 64,
+                 T: int = 50,
+                 n_mels: int = 80,
+                 layers: int = 30,
+                 cycle_length: int = 10
                  ):
         super().__init__()
 
@@ -125,7 +126,7 @@ class DiffWave(nn.Module):
             nn.ReLU(inplace=True)
         )
         self.diffusion_embedding = DiffusionEmbedding(T)
-        self.spectrogram_upsampler = SpectrogramUpsampler(n_mels)
+        self.spectrogram_upsampler = SpectrogramUpsampler()
 
         dilations = [2 ** (i % cycle_length) for i in range(layers)]
         self.residual_layers = nn.ModuleList([
@@ -137,14 +138,16 @@ class DiffWave(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv1d(res_channels, 1, 1)
         )
-        nn.init.zeros_(self.output_projection[2].weight)
+        # nn.init.zeros_(self.output_projection[2].weight)
+        # nn.init.zeros_(self.output_projection[2].bias)
 
     def forward(self, audio, spectrogram, diffusion_step):
         x = audio.unsqueeze(1)
         x = self.input_projection(x)
 
         diffusion_step = self.diffusion_embedding(diffusion_step)
-        spectrogram = self.spectrogram_upsampler(spectrogram)
+        spectrogram = self.spectrogram_upsampler(
+            spectrogram)[..., :x.shape[-1]]
 
         skip = 0
         for layer in self.residual_layers:
@@ -152,5 +155,17 @@ class DiffWave(nn.Module):
             skip += skip_connection
 
         x = skip / sqrt(len(self.residual_layers))
-        x = self.output_projection(x)
+        x = self.output_projection(x).squeeze(1)
         return x
+
+
+if __name__ == "__main__":
+    from torchinfo import summary
+    net = DiffWave()
+    x = torch.rand(1, 16000)  # .cuda()
+    mels = torch.randn(1, 80, 64)
+    t = torch.randint(low=0, high=50, size=(1,))
+    summary(net, input_data=(x, mels, t), device='cpu',
+            col_names=("input_size", "output_size", "num_params", "kernel_size",
+                       "mult_adds"),
+            col_width=16)
