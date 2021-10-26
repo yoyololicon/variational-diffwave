@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import random
+import torch
 from torch.utils.data import Dataset
 from tqdm import tqdm
 import torchaudio
@@ -31,7 +32,7 @@ class RandomWAVDataset(Dataset):
                 filename = os.path.join(self.data_path, f)
                 meta = torchaudio.info(filename)
                 self.files.append(filename)
-                file_lengths.append(max(1, meta.num_frames - segment + 1))
+                file_lengths.append(max(0, meta.num_frames - segment) + 1)
 
                 if not self.sr:
                     self.sr = meta.sample_rate
@@ -54,4 +55,6 @@ class RandomWAVDataset(Dataset):
         x = torchaudio.load(f, frame_offset=pos,
                             num_frames=self.segment)[0].mean(0)
 
+        if x.numel() < self.segment:
+            x = torch.cat([x, x.new_zeros(self.segment - x.numel())])
         return x
