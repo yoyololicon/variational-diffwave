@@ -27,7 +27,7 @@ class RandomWAVDataset(Dataset):
         file_lengths = []
 
         print("Gathering training files ...")
-        for f in tqdm(os.listdir(self.data_path)):
+        for f in tqdm(sorted(os.listdir(self.data_path))):
             if f.endswith('.wav'):
                 filename = os.path.join(self.data_path, f)
                 meta = torchaudio.info(filename)
@@ -47,14 +47,15 @@ class RandomWAVDataset(Dataset):
         return self.size
 
     def __getitem__(self, index):
-        rand_pos = random.uniform(0, 1)
-        index = np.digitize(rand_pos, self.boundaries[1:], right=True)
-        f, length = self.files[index], self.file_lengths[index]
-        pos = int(round(length * (rand_pos - self.boundaries[index]) / (
-            self.boundaries[index+1] - self.boundaries[index])))
-        x = torchaudio.load(f, frame_offset=pos,
+        uniform_pos = index / self.size
+        bin_pos = np.digitize(uniform_pos, self.boundaries[1:], right=False)
+        f, length = self.files[bin_pos], self.file_lengths[bin_pos]
+        offset = int(length * (uniform_pos - self.boundaries[index]) / (
+            self.boundaries[index+1] - self.boundaries[index]))
+        x = torchaudio.load(f, frame_offset=offset,
                             num_frames=self.segment)[0].mean(0)
 
+        # this should not happen but I just want to make sure
         if x.numel() < self.segment:
             x = torch.cat([x, x.new_zeros(self.segment - x.numel())])
         return x
