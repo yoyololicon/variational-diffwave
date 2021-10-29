@@ -50,8 +50,8 @@ class RandomWAVDataset(Dataset):
         uniform_pos = index / self.size
         bin_pos = np.digitize(uniform_pos, self.boundaries[1:], right=False)
         f, length = self.files[bin_pos], self.file_lengths[bin_pos]
-        offset = int(length * (uniform_pos - self.boundaries[index]) / (
-            self.boundaries[index+1] - self.boundaries[index]))
+        offset = int(length * (uniform_pos - self.boundaries[bin_pos]) / (
+            self.boundaries[bin_pos+1] - self.boundaries[bin_pos]))
         x = torchaudio.load(f, frame_offset=offset,
                             num_frames=self.segment)[0].mean(0)
 
