@@ -93,6 +93,12 @@
                     "items": {
                         "type": "string"
                     }
+                },
+                "minimize_var": {
+                    "type": "boolean"
+                },
+                "with_amp": {
+                    "type": "boolean"
                 }
             },
             "required": [
@@ -108,7 +114,9 @@
                 "sr",
                 "train_T",
                 "eval_T",
-                "extra_monitor"
+                "extra_monitor",
+                "minimize_var",
+                "with_amp"
             ]
         }
     },

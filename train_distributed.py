@@ -107,15 +107,16 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer, criterion, sched
         x = x.to(device)
         noise = torch.randn_like(x)
         mels = mel_spec(x)
-        with amp.autocast(enabled=with_amp):
-            N = x.shape[0]
-            if train_T:
-                s = torch.remainder(
-                    uniform(0, 1) + torch.arange(N, device=device) / N, 1.)
-                s_idx = torch.round(s * (train_T - 1)).long()
-                t_idx = s_idx + 1
 
-                t, s = t_idx / train_T, s_idx / train_T
+        N = x.shape[0]
+        if train_T:
+            s = torch.remainder(
+                uniform(0, 1) + torch.arange(N, device=device) / N, 1.)
+            s_idx = torch.round(s * (train_T - 1)).long()
+            t_idx = s_idx + 1
+
+            t, s = t_idx / train_T, s_idx / train_T
+            with amp.autocast(enabled=with_amp):
                 gamma_t = noise_scheduler(t)
                 gamma_s = noise_scheduler(s)
                 alpha_t, var_t = gamma2as(gamma_t)
@@ -128,13 +129,14 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer, criterion, sched
                     base_noise_scheduler.gamma1,
                     (gamma_t - gamma_s) * train_T,
                     x, noise, noise_hat)
-            else:
-                t = torch.remainder(
-                    uniform(0, 1) + torch.arange(N, device=device) / N, 1.)
-                t = t.clone().detach().requires_grad_(True)
+        else:
+            t = torch.remainder(
+                uniform(0, 1) + torch.arange(N, device=device) / N, 1.)
+            t = t.clone().detach().requires_grad_(True)
 
+            with amp.autocast(enabled=with_amp):
                 gamma_t = noise_scheduler(t)
-                # gamma_t.retain_grad()
+                gamma_t.retain_grad()
 
                 alpha_t, var_t = gamma2as(gamma_t)
                 z_t = alpha_t[:, None] * x + var_t.sqrt()[:, None] * noise
@@ -148,17 +150,18 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer, criterion, sched
                     d_gamma_t,
                     x, noise, noise_hat)
 
-            # if minimize_var:
-            #     loss_T_raw = extra_dict['loss_T_raw']
-            #     loss.backward(retain_graph=True)
-            #     gamma_t.backward(gradient=(2 * loss_T_raw - 1) * gamma_t.grad)
-            # else:
+        if minimize_var:
+            loss_T_raw = extra_dict['loss_T_raw']
+            handle = gamma_t.register_hook(lambda grad: 2 * grad * loss_T_raw)
+
         # loss.backward()
         scaler.scale(loss).backward()
         # optimizer.step()
         scaler.step(optimizer)
         scaler.update()
 
+        if minimize_var:
+            handle.remove()
         result = {'loss': loss.item()}
         result.update(extra_dict)
         return result
@@ -292,39 +295,41 @@ def training(local_rank, config: dict):
             #     1, hop_length * (eval_mels.shape[-1] - 1) + 1, device=device)
             z_t = torch.randn_like(eval_x)
 
-            with amp.autocast(enabled=with_amp):
-                if train_T:
-                    steps = torch.linspace(0, train_T, eval_T + 1,
-                                           device=device).round().long()
-                    gamma = noise_scheduler(steps / train_T)
-                else:
-                    steps = torch.linspace(0, 1, eval_T + 1, device=device)
-                    gamma = noise_scheduler(steps)
+            if train_T:
+                steps = torch.linspace(0, train_T, eval_T + 1,
+                                       device=device).round().long()
+                gamma = noise_scheduler(steps / train_T)
+            else:
+                steps = torch.linspace(0, 1, eval_T + 1, device=device)
+                gamma = noise_scheduler(steps)
 
-                alpha, var = gamma2as(gamma)
-                var_ts = - \
-                    torch.expm1(F.softplus(gamma[:-1]) - F.softplus(gamma[1:]))
-                print(alpha, var, var_ts)
+            alpha, var = gamma2as(gamma)
+            var_ts = - \
+                torch.expm1(F.softplus(gamma[:-1]) - F.softplus(gamma[1:]))
+            var_ts.relu_()
+            print(alpha, var, var_ts)
 
-                kld = 0
-                for t in tqdm(range(eval_T, 0, -1)):
-                    s = t - 1
+            kld = 0
+            for t in tqdm(range(eval_T, 0, -1)):
+                s = t - 1
+                with amp.autocast(enabled=with_amp):
                     noise_hat = ema_model(z_t, eval_mels, steps[t:t+1])
-                    alpha_ts = alpha[t] / alpha[s]
+                noise_hat = noise_hat.float()
+                alpha_ts = alpha[t] / alpha[s]
 
-                    noise = (z_t - alpha[t] * eval_x) * var[t].rsqrt()
-                    kld += 0.5 * (gamma[t] - gamma[s]) * \
-                        F.mse_loss(noise_hat, noise)
+                noise = (z_t - alpha[t] * eval_x) * var[t].rsqrt()
+                kld += 0.5 * (gamma[t] - gamma[s]) * \
+                    F.mse_loss(noise_hat, noise)
 
-                    mu = (z_t - var_ts[s] * var[t].rsqrt()
-                          * noise_hat) / alpha_ts
-                    z_t = mu
-                    if s:
-                        z_t += (var_ts[s] * var[s] / var[t]).sqrt() * \
-                            torch.rand_like(z_t)
+                mu = (z_t - var_ts[s] * var[t].rsqrt()
+                      * noise_hat) / alpha_ts
+                z_t = mu
+                if s:
+                    z_t += (var_ts[s] * var[s] / var[t]).sqrt() * \
+                        torch.rand_like(z_t)
 
-                ll = -0.5 * (F.mse_loss(z_t, eval_x).log() +
-                             1 + math.log(2 * math.pi)) - kld
+            ll = -0.5 * (F.mse_loss(z_t, eval_x).log() +
+                         1 + math.log(2 * math.pi)) - kld
 
             print("Log likelihood:", ll.item())
 

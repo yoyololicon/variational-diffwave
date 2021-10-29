@@ -2,13 +2,15 @@
     "name": "DiffWave",
     "arch": {
         "type": "DiffWave",
-        "args": {}
+        "args": {
+            "T": 100
+        }
     },
     "dataset": {
         "type": "RandomWAVDataset",
         "args": {
             "data_dir": "~/data-disk/Datasets/LJSpeech-1.1/wavs/",
-            "size": 8000000,
+            "size": 16000000,
             "segment": 16000
         }
     },
@@ -27,12 +29,12 @@
         }
     },
     "data_loader": {
-        "batch_size": 8,
-        "shuffle": false,
+        "batch_size": 16,
+        "shuffle": true,
         "drop_last": false,
         "num_workers": 2,
-        "prefetch_factor": 4,
-        "pin_memory": false
+        "prefetch_factor": 6,
+        "pin_memory": true
     },
     "trainer": {
         "save_dir": "saved/",
@@ -51,6 +53,8 @@
             "kld",
             "ll",
             "loss_T"
-        ]
+        ],
+        "minimize_var": true,
+        "with_amp": true
     }
 }

@@ -31,10 +31,10 @@ def diffusion_elbo(gamma_0, gamma_1, d_gamma_t,
     }
     # diffusion loss
     diff = noise - noise_hat
-    loss_T = 0.5 * (d_gamma_t * (diff * diff).mean(1)
-                    ).mean()  # / d_gamma_t.shape[0]
-    # loss_T = loss_T_raw.sum()
-    # extra_dict['loss_T_raw'] = loss_T_raw
+    loss_T_raw = 0.5 * (d_gamma_t * (diff * diff).mean(1)
+                        ) / d_gamma_t.shape[0]
+    loss_T = loss_T_raw.sum()
+    extra_dict['loss_T_raw'] = loss_T_raw.detach()
     extra_dict['loss_T'] = loss_T.item()
 
     loss = prior_loss + recon_loss + loss_T
