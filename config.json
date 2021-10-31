@@ -32,8 +32,8 @@
         "batch_size": 16,
         "shuffle": true,
         "drop_last": false,
-        "num_workers": 2,
-        "prefetch_factor": 6,
+        "num_workers": 4,
+        "prefetch_factor": 4,
         "pin_memory": true
     },
     "trainer": {

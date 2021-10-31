@@ -4,6 +4,8 @@ import torch
 import torch.nn.functional as F
 from torch import optim, nn
 from torch.cuda import amp
+from torch.distributed.optim import ZeroRedundancyOptimizer
+from contiguous_params import ContiguousParams
 import torchaudio
 from torchinfo import summary
 import argparse
@@ -38,18 +40,26 @@ def get_dataflow(config: dict):
 
 
 def initialize(config: dict, device):
-    model = get_instance(module_arch, config['arch'])
-    model = idist.auto_model(model)
-    noise_scheduler = module_arch.NoiseScheduler()  # .to(device)
-    noise_scheduler = idist.auto_model(noise_scheduler)
+    model = get_instance(module_arch, config['arch']).to(device)
+    noise_scheduler = module_arch.NoiseScheduler().to(device)
 
     parameters = chain(model.parameters(), noise_scheduler.parameters())
+    parameters = ContiguousParams(parameters)
+
+    model = idist.auto_model(model)
+    noise_scheduler = idist.auto_model(noise_scheduler)
+
+    optim_args = config['optimizer']['args']
     try:
-        optimizer = get_instance(optim, config['optimizer'], parameters)
+        # optimizer = get_instance(optim, config['optimizer'], parameters)
+        optim_type = getattr(optim, config['optimizer']['type'])
     except AttributeError:
-        optimizer = get_instance(
-            torch_optimizer, config['optimizer'], parameters)
-    optimizer = idist.auto_optim(optimizer)
+        # optimizer = get_instance(
+        #     torch_optimizer, config['optimizer'], parameters)
+        optim_type = getattr(torch_optimizer, config['optimizer']['type'])
+    optimizer = ZeroRedundancyOptimizer(
+        parameters.contiguous(), optim_type, parameters_as_bucket_view=False, **optim_args)
+    # optimizer = idist.auto_optim(optimizer)
 
     scheduler = get_instance(
         optim.lr_scheduler, config['lr_scheduler'], optimizer)
@@ -81,7 +91,7 @@ def get_logger(trainer, model, noise_scheduler, optimizer, log_dir, model_name, 
     return tb_logger
 
 
-def create_trainer(model, mel_spec, noise_scheduler, optimizer, criterion, scheduler, device, trainer_config, train_sampler, model_name: str, checkpoint_path: str):
+def create_trainer(model, mel_spec, noise_scheduler, optimizer: ZeroRedundancyOptimizer, criterion, scheduler, device, trainer_config, train_sampler, model_name: str, checkpoint_path: str):
     extra_monitor = trainer_config['extra_monitor']
     save_dir = trainer_config['save_dir']
     eval_interval = trainer_config['eval_interval']
@@ -142,8 +152,7 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer, criterion, sched
                 z_t = alpha_t[:, None] * x + var_t.sqrt()[:, None] * noise
 
                 noise_hat = model(z_t, mels, t.detach())
-                d_gamma_t, *_ = grad(gamma_t.sum(), t,
-                                     only_inputs=True, create_graph=True)
+                d_gamma_t, *_ = grad(gamma_t.sum(), t, create_graph=True)
                 loss, extra_dict = criterion(
                     base_noise_scheduler.gamma0,
                     base_noise_scheduler.gamma1,
@@ -193,6 +202,11 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer, criterion, sched
             'noise_scheduler': noise_scheduler,
             'scaler': scaler
         }
+
+    @trainer.on(Events.ITERATION_COMPLETED(every=eval_interval))
+    def consolidate_state_dict():
+        optimizer.consolidate_state_dict()
+        idist.barrier()
 
     common.setup_common_training_handlers(
         trainer,
