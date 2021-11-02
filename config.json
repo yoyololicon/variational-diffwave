@@ -47,14 +47,14 @@
         "n_mels": 80,
         "sr": 22050,
         "eval_interval": 10000,
-        "train_T": 0,
+        "train_T": 100,
         "eval_T": 25,
         "extra_monitor": [
             "kld",
             "ll",
             "loss_T"
         ],
-        "minimize_var": true,
+        "minimize_var": false,
         "with_amp": true
     }
 }

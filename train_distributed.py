@@ -122,22 +122,27 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer: ZeroRedundancyOp
         if train_T:
             s = torch.remainder(
                 uniform(0, 1) + torch.arange(N, device=device) / N, 1.)
-            s_idx = torch.round(s * (train_T - 1)).long()
+            s_idx = (s * train_T).long()
             t_idx = s_idx + 1
 
             t, s = t_idx / train_T, s_idx / train_T
             with amp.autocast(enabled=with_amp):
                 gamma_t = noise_scheduler(t)
                 gamma_s = noise_scheduler(s)
+                # snr_t, snr_s = gamma2snr(gamma_t), gamma2snr(gamma_s)
+                # alpha_t, var_t = snr2as(snr_t)
                 alpha_t, var_t = gamma2as(gamma_t)
 
                 z_t = alpha_t[:, None] * x + var_t.sqrt()[:, None] * noise
 
                 noise_hat = model(z_t, mels, t_idx)
+                # x_hat = (z_t - var_t.sqrt()[:, None]
+                #          * noise_hat) / alpha_t[:, None]
+
                 loss, extra_dict = criterion(
                     base_noise_scheduler.gamma0,
                     base_noise_scheduler.gamma1,
-                    (gamma_t - gamma_s) * train_T,
+                    torch.expm1(gamma_t - gamma_s) * train_T,
                     x, noise, noise_hat)
         else:
             t = torch.remainder(
@@ -317,7 +322,8 @@ def training(local_rank, config: dict):
                 steps = torch.linspace(0, 1, eval_T + 1, device=device)
                 gamma = noise_scheduler(steps)
 
-            alpha, var = gamma2as(gamma)
+            snr = gamma2snr(gamma)
+            alpha, var = snr2as(snr)
             var_ts = - \
                 torch.expm1(F.softplus(gamma[:-1]) - F.softplus(gamma[1:]))
             var_ts.relu_()
@@ -332,8 +338,10 @@ def training(local_rank, config: dict):
                 alpha_ts = alpha[t] / alpha[s]
 
                 noise = (z_t - alpha[t] * eval_x) * var[t].rsqrt()
-                kld += 0.5 * (gamma[t] - gamma[s]) * \
+                kld += 0.5 * torch.expm1(gamma[t] - gamma[s]) * \
                     F.mse_loss(noise_hat, noise)
+                # kld += 0.5 * (gamma[t] - gamma[s]) * \
+                #     F.mse_loss(noise_hat, noise)
 
                 mu = (z_t - var_ts[s] * var[t].rsqrt()
                       * noise_hat) / alpha_ts

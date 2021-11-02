@@ -22,7 +22,7 @@ def gamma2snr(g: Tensor) -> Tensor:
 
 def snr2as(snr: Tensor):
     snr_p1 = snr + 1
-    return torch.sqrt(snr / snr_p1), snr_p1.rsqrt()
+    return torch.sqrt(snr / snr_p1), snr_p1.reciprocal()
 
 
 def gamma2as(g: Tensor):
