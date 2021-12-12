@@ -13,7 +13,6 @@ import json
 from datetime import datetime
 from itertools import chain
 import matplotlib.pyplot as plt
-from tqdm import tqdm
 import os
 from random import randrange, sample, uniform
 from jsonschema import validate
@@ -31,6 +30,7 @@ from utils.utils import get_instance, gamma2snr, snr2as, gamma2as
 import models as module_arch
 import dataset as module_data
 import loss as module_loss
+from inference import reverse_process
 
 
 def get_dataflow(config: dict):
@@ -127,17 +127,13 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer: ZeroRedundancyOp
 
             t, s = t_idx / train_T, s_idx / train_T
             with amp.autocast(enabled=with_amp):
-                gamma_t = noise_scheduler(t)
-                gamma_s = noise_scheduler(s)
-                # snr_t, snr_s = gamma2snr(gamma_t), gamma2snr(gamma_s)
-                # alpha_t, var_t = snr2as(snr_t)
+                gamma_t, _ = noise_scheduler(t)
+                gamma_s, _ = noise_scheduler(s)
                 alpha_t, var_t = gamma2as(gamma_t)
 
                 z_t = alpha_t[:, None] * x + var_t.sqrt()[:, None] * noise
 
                 noise_hat = model(z_t, mels, t_idx)
-                # x_hat = (z_t - var_t.sqrt()[:, None]
-                #          * noise_hat) / alpha_t[:, None]
 
                 loss, extra_dict = criterion(
                     base_noise_scheduler.gamma0,
@@ -150,8 +146,8 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer: ZeroRedundancyOp
             t = t.clone().detach().requires_grad_(True)
 
             with amp.autocast(enabled=with_amp):
-                gamma_t = noise_scheduler(t)
-                gamma_t.retain_grad()
+                gamma_t, gamma_hat = noise_scheduler(t)
+                gamma_hat.retain_grad()
 
                 alpha_t, var_t = gamma2as(gamma_t)
                 z_t = alpha_t[:, None] * x + var_t.sqrt()[:, None] * noise
@@ -164,9 +160,10 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer: ZeroRedundancyOp
                     d_gamma_t,
                     x, noise, noise_hat)
 
-        if minimize_var:
-            loss_T_raw = extra_dict['loss_T_raw']
-            handle = gamma_t.register_hook(lambda grad: 2 * grad * loss_T_raw)
+            # if minimize_var:
+                loss_T_raw = extra_dict['loss_T_raw']
+                handle = gamma_hat.register_hook(
+                    lambda grad: 2 * grad * loss_T_raw)
 
         # loss.backward()
         scaler.scale(loss).backward()
@@ -174,7 +171,7 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer: ZeroRedundancyOp
         scaler.step(optimizer)
         scaler.update()
 
-        if minimize_var:
+        if not train_T:
             handle.remove()
         result = {'loss': loss.item()}
         result.update(extra_dict)
@@ -312,50 +309,22 @@ def training(local_rank, config: dict):
 
             # z_t = torch.randn(
             #     1, hop_length * (eval_mels.shape[-1] - 1) + 1, device=device)
-            z_t = torch.randn_like(eval_x)
+            z_1 = torch.randn_like(eval_x)
 
             if train_T:
                 steps = torch.linspace(0, train_T, eval_T + 1,
                                        device=device).round().long()
-                gamma = noise_scheduler(steps / train_T)
+                gamma, _ = noise_scheduler(steps / train_T)
             else:
                 steps = torch.linspace(0, 1, eval_T + 1, device=device)
-                gamma = noise_scheduler(steps)
+                gamma, _ = noise_scheduler(steps)
 
-            snr = gamma2snr(gamma)
-            alpha, var = snr2as(snr)
-            var_ts = - \
-                torch.expm1(F.softplus(gamma[:-1]) - F.softplus(gamma[1:]))
-            var_ts.relu_()
-            print(alpha, var, var_ts)
+            z_0 = reverse_process(z_1, eval_mels, gamma,
+                                  steps, ema_model, with_amp=with_amp)
 
-            kld = 0
-            for t in tqdm(range(eval_T, 0, -1)):
-                s = t - 1
-                with amp.autocast(enabled=with_amp):
-                    noise_hat = ema_model(z_t, eval_mels, steps[t:t+1])
-                noise_hat = noise_hat.float()
-                alpha_ts = alpha[t] / alpha[s]
+            # print("Log likelihood:", ll.item())
 
-                noise = (z_t - alpha[t] * eval_x) * var[t].rsqrt()
-                kld += 0.5 * torch.expm1(gamma[t] - gamma[s]) * \
-                    F.mse_loss(noise_hat, noise)
-                # kld += 0.5 * (gamma[t] - gamma[s]) * \
-                #     F.mse_loss(noise_hat, noise)
-
-                mu = (z_t - var_ts[s] * var[t].rsqrt()
-                      * noise_hat) / alpha_ts
-                z_t = mu
-                if s:
-                    z_t += (var_ts[s] * var[s] / var[t]).sqrt() * \
-                        torch.rand_like(z_t)
-
-            ll = -0.5 * (F.mse_loss(z_t, eval_x).log() +
-                         1 + math.log(2 * math.pi)) - kld
-
-            print("Log likelihood:", ll.item())
-
-            predict = z_t.squeeze().clip(-0.99, 0.99)
+            predict = z_0.squeeze().clip(-0.99, 0.99)
             tb_logger.writer.add_audio(
                 'predict', predict, engine.state.iteration, sample_rate=sr)
 
@@ -363,7 +332,7 @@ def training(local_rank, config: dict):
         def plot_noise_curve(engine):
             figure = plt.figure()
             steps = torch.linspace(0, 1, 100, device=device)
-            log_snr = -noise_scheduler(steps).detach().cpu().numpy()
+            log_snr = -noise_scheduler(steps)[0].detach().cpu().numpy()
             steps = steps.cpu().numpy()
             plt.plot(steps, log_snr)
             tb_logger.writer.add_figure(

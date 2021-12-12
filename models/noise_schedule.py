@@ -32,11 +32,13 @@ class NoiseScheduler(nn.Module):
         max_gamma_hat = self.gamma_hat(torch.ones_like(t))
         min_gamma_hat = self.gamma_hat(torch.zeros_like(t))
         gamma_hat = self.gamma_hat(t)
+        gamma0, gamma1 = self.gamma0, self.gamma1
+        normalized_gamma_hat = (gamma_hat - min_gamma_hat) / \
+            (max_gamma_hat - min_gamma_hat)
         # gamma = gamma_hat
-        gamma = self.gamma0 + (self.gamma1 - self.gamma0) * \
-            (gamma_hat - min_gamma_hat) / (max_gamma_hat - min_gamma_hat)
+        gamma = gamma0 + (gamma1 - gamma0) * normalized_gamma_hat
 
-        return gamma.squeeze(1)
+        return gamma.squeeze(1), normalized_gamma_hat.squeeze(1)
 
 
 if __name__ == '__main__':
