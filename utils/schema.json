@@ -107,7 +107,6 @@
                 "eval_file",
                 "cum_steps",
                 "eval_interval",
-                "amp_enabled",
                 "n_fft",
                 "hop_length",
                 "n_mels",

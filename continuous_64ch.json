@@ -1,0 +1,59 @@
+{
+    "name": "DiffWave",
+    "arch": {
+        "type": "DiffWave",
+        "args": {
+            "T": 100
+        }
+    },
+    "dataset": {
+        "type": "RandomWAVDataset",
+        "args": {
+            "data_dir": "~/data-disk/Datasets/LJSpeech-1.1/wavs/",
+            "size": 16000000,
+            "segment": 16000
+        }
+    },
+    "optimizer": {
+        "type": "Adam",
+        "args": {
+            "lr": 2e-4
+        }
+    },
+    "lr_scheduler": {
+        "type": "ReduceLROnPlateau",
+        "args": {
+            "factor": 0.3,
+            "patience": 1000000,
+            "verbose": true
+        }
+    },
+    "data_loader": {
+        "batch_size": 16,
+        "shuffle": true,
+        "drop_last": false,
+        "num_workers": 4,
+        "prefetch_factor": 4,
+        "pin_memory": true
+    },
+    "trainer": {
+        "save_dir": "saved/",
+        "log_dir": "runs/",
+        "eval_file": "~/data-disk/Datasets/LJSpeech-1.1/wavs/LJ001-0001.wav",
+        "cum_steps": 1,
+        "n_fft": 1024,
+        "hop_length": 256,
+        "n_mels": 80,
+        "sr": 22050,
+        "eval_interval": 10000,
+        "train_T": 0,
+        "eval_T": 25,
+        "extra_monitor": [
+            "kld",
+            "ll",
+            "loss_T"
+        ],
+        "minimize_var": true,
+        "with_amp": true
+    }
+}

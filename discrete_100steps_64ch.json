@@ -41,7 +41,6 @@
         "log_dir": "runs/",
         "eval_file": "~/data-disk/Datasets/LJSpeech-1.1/wavs/LJ001-0001.wav",
         "cum_steps": 1,
-        "amp_enabled": false,
         "n_fft": 1024,
         "hop_length": 256,
         "n_mels": 80,
