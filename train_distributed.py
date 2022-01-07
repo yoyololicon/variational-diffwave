@@ -28,7 +28,7 @@ import torch_optimizer
 from utils.schema import CONFIG_SCHEMA
 from utils.utils import get_instance, gamma2snr, snr2as, gamma2as
 import models as module_arch
-import dataset as module_data
+import datasets as module_data
 import loss as module_loss
 from inference import reverse_process
 

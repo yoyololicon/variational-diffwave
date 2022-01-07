@@ -86,11 +86,11 @@ class SpectrogramUpsampler(nn.Module):
 
 
 class ResidualBlock(nn.Module):
-    def __init__(self, n_mels, residual_channels, dilation, last_layer=False):
+    def __init__(self, residual_channels, dilation, last_layer=False):
         super().__init__()
         self.diffusion_projection = nn.Linear(512, residual_channels)
         self.dilated_conv = nn.Conv1d(
-            residual_channels + n_mels, 2 * residual_channels, 3, padding=dilation, dilation=dilation)
+            residual_channels, 2 * residual_channels, 3, padding=dilation, dilation=dilation)
 
         self.chs_split = [residual_channels]
         if last_layer:
@@ -104,8 +104,7 @@ class ResidualBlock(nn.Module):
     def forward(self, x, conditioner, diffusion_step):
         diffusion_step = self.diffusion_projection(
             diffusion_step).unsqueeze(-1)
-
-        y = self.dilated_conv(torch.cat([x + diffusion_step, conditioner], 1))
+        y = self.dilated_conv(x + diffusion_step) + conditioner
         y = gru(y)
         *residual, skip = self.output_projection(y).split(self.chs_split, 1)
         return (x + residual[0]) / sqrt(2.0) if len(residual) else None, skip
@@ -130,7 +129,7 @@ class DiffWave(nn.Module):
 
         dilations = [2 ** (i % cycle_length) for i in range(layers)]
         self.residual_layers = nn.ModuleList([
-            ResidualBlock(n_mels, res_channels, d) for d in dilations
+            ResidualBlock(res_channels, d) for d in dilations
         ])
 
         self.output_projection = nn.Sequential(
@@ -141,6 +140,9 @@ class DiffWave(nn.Module):
         # nn.init.zeros_(self.output_projection[2].weight)
         # nn.init.zeros_(self.output_projection[2].bias)
 
+        self.conditioner = nn.Conv1d(
+            n_mels, res_channels * 2 * layers, 1, bias=False)
+
     def forward(self, audio, spectrogram, diffusion_step):
         x = audio.unsqueeze(1)
         x = self.input_projection(x)
@@ -149,9 +151,11 @@ class DiffWave(nn.Module):
         spectrogram = self.spectrogram_upsampler(
             spectrogram)[..., :x.shape[-1]]
 
+        condition = self.conditioner(spectrogram).chunk(
+            len(self.residual_layers), 1)
         skip = 0
-        for layer in self.residual_layers:
-            x, skip_connection = layer(x, spectrogram, diffusion_step)
+        for layer, c in zip(self.residual_layers, condition):
+            x, skip_connection = layer(x, c, diffusion_step)
             skip += skip_connection
 
         x = skip / sqrt(len(self.residual_layers))
