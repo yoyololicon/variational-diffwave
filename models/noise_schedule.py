@@ -25,7 +25,7 @@ class NoiseScheduler(nn.Module):
 
     def gamma_hat(self, t: torch.Tensor):
         l1 = self.l1(t)
-        return l1 + self.l3(self.l2(t).sigmoid())
+        return l1 + self.l3(self.l2(l1).sigmoid())
 
     def forward(self, t: torch.Tensor):
         t = t.clamp(0, 1).unsqueeze(-1)
