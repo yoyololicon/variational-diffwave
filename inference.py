@@ -33,6 +33,6 @@ def reverse_process(z_1, mels, gamma, steps, model, with_amp=False):
         z_t = mu
         if s:
             z_t += (var_ts[s] * var[s] / var[t]).sqrt() * \
-                torch.rand_like(z_t)
+                torch.randn_like(z_t)
 
     return z_t
