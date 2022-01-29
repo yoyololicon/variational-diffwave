@@ -3,15 +3,16 @@
     "arch": {
         "type": "DiffWave",
         "args": {
-            "T": 100
+            "T": 1000
         }
     },
     "dataset": {
         "type": "RandomWAVDataset",
         "args": {
-            "data_dir": "~/data-disk/Datasets/LJSpeech-1.1/wavs/",
+            "data_dir": "~/data-disk/Datasets/LJ/LJSpeech-1.1/wavs/",
             "size": 16000000,
-            "segment": 16000
+            "segment": 16000,
+            "deterministic": false
         }
     },
     "optimizer": {
@@ -30,7 +31,7 @@
     },
     "data_loader": {
         "batch_size": 16,
-        "shuffle": true,
+        "shuffle": false,
         "drop_last": false,
         "num_workers": 4,
         "prefetch_factor": 4,
@@ -39,15 +40,15 @@
     "trainer": {
         "save_dir": "saved/",
         "log_dir": "runs/",
-        "eval_file": "~/data-disk/Datasets/LJSpeech-1.1/wavs/LJ001-0001.wav",
+        "eval_file": "~/data-disk/Datasets/LJ/LJSpeech-1.1/wavs/LJ001-0001.wav",
         "cum_steps": 1,
         "n_fft": 1024,
         "hop_length": 256,
         "n_mels": 80,
         "sr": 22050,
         "eval_interval": 10000,
-        "train_T": 100,
-        "eval_T": 25,
+        "train_T": 1000,
+        "eval_T": 50,
         "extra_monitor": [
             "kld",
             "ll",
