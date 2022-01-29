@@ -20,8 +20,8 @@ class NoiseScheduler(nn.Module):
         self.l3 = parametrize.register_parametrization(
             nn.Linear(1024, 1, bias=False), 'weight', Nonnegative())
 
-        self.gamma1 = nn.Parameter(torch.ones(1) * 5, requires_grad=True)
-        self.gamma0 = nn.Parameter(torch.ones(1) * -8, requires_grad=True)
+        self.gamma1 = nn.Parameter(torch.ones(1) * 0, requires_grad=True)
+        self.gamma0 = nn.Parameter(torch.ones(1) * -10, requires_grad=True)
 
     def gamma_hat(self, t: torch.Tensor):
         l1 = self.l1(t)

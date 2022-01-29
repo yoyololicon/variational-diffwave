@@ -127,8 +127,8 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer: ZeroRedundancyOp
 
             t, s = t_idx / train_T, s_idx / train_T
             with amp.autocast(enabled=with_amp):
-                gamma_t, _ = noise_scheduler(t)
-                gamma_s, _ = noise_scheduler(s)
+                gamma_ts, _ = noise_scheduler(torch.cat([t, s], dim=0))
+                gamma_t, gamma_s = gamma_ts[:N], gamma_ts[N:]
                 alpha_t, var_t = gamma2as(gamma_t)
 
                 z_t = alpha_t[:, None] * x + var_t.sqrt()[:, None] * noise
