@@ -15,13 +15,9 @@ def diffusion_elbo(gamma_0, gamma_1, d_gamma_t,
     prior_loss = 0.5 * torch.mean(var_1 + mu * mu - 1 - var_1.log())
 
     # recon loss E[-log p(x | z_0)]
-    # z_0 = alpha_0 * x + var_0.sqrt() * torch.randn_like(x)
-    diff = (1 - alpha_0) * x  # - var_0.sqrt() * torch.randn_like(x)
+    diff = (1 - alpha_0) * x
     l2 = diff * diff
-    # var = l2.mean().detach().item()
-    # var = 1e-4
     ll = -0.5 * (var_0.log() + l2 / var_0 + math.log(2 * math.pi)).mean()
-    # ll = -0.5 * (F.mse_loss(z_0, x) + math.log(2 * math.pi))
     recon_loss = -ll
 
     extra_dict = {

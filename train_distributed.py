@@ -22,8 +22,7 @@ from ignite.contrib.handlers.tensorboard_logger import *
 from ignite.contrib.engines import common
 from ignite import distributed as idist
 import torch_optimizer
-# from pixyz.losses import KullbackLeibler, LogProb
-# from pixyz.distributions import Normal
+
 
 from utils.schema import CONFIG_SCHEMA
 from utils.utils import get_instance, gamma2snr, snr2as, gamma2as
@@ -51,11 +50,8 @@ def initialize(config: dict, device):
 
     optim_args = config['optimizer']['args']
     try:
-        # optimizer = get_instance(optim, config['optimizer'], parameters)
         optim_type = getattr(optim, config['optimizer']['type'])
     except AttributeError:
-        # optimizer = get_instance(
-        #     torch_optimizer, config['optimizer'], parameters)
         optim_type = getattr(torch_optimizer, config['optimizer']['type'])
     optimizer = ZeroRedundancyOptimizer(
         parameters.contiguous(), optim_type, parameters_as_bucket_view=False, **optim_args)
@@ -160,14 +156,11 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer: ZeroRedundancyOp
                     d_gamma_t,
                     x, noise, noise_hat)
 
-            # if minimize_var:
                 loss_T_raw = extra_dict['loss_T_raw']
                 handle = gamma_hat.register_hook(
                     lambda grad: 2 * grad * loss_T_raw)
 
-        # loss.backward()
         scaler.scale(loss).backward()
-        # optimizer.step()
         scaler.step(optimizer)
         scaler.update()
 
@@ -272,7 +265,6 @@ def training(local_rank, config: dict):
 
     mel_spec = module_arch.MelSpec(sr, n_fft, hop_length=hop_length,
                                    f_min=20, f_max=8000, n_mels=n_mels).to(device)
-    # mel_spec = idist.auto_model(mel_spec)
 
     trainer, ema_model = create_trainer(model, mel_spec, noise_scheduler, optimizer,
                                         criterion, scheduler, device, trainer_config, train_loader.sampler,
@@ -307,8 +299,6 @@ def training(local_rank, config: dict):
             # model.eval()
             noise_scheduler.eval()
 
-            # z_t = torch.randn(
-            #     1, hop_length * (eval_mels.shape[-1] - 1) + 1, device=device)
             z_1 = torch.randn_like(eval_x)
 
             if train_T:
@@ -321,8 +311,6 @@ def training(local_rank, config: dict):
 
             z_0 = reverse_process(z_1, eval_mels, gamma,
                                   steps, ema_model, with_amp=with_amp)
-
-            # print("Log likelihood:", ll.item())
 
             predict = z_0.squeeze().clip(-0.99, 0.99)
             tb_logger.writer.add_audio(
