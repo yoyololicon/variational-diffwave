@@ -1,0 +1,61 @@
+import argparse
+import json
+import torch
+import torchaudio
+
+
+import models as module_arch
+from utils.utils import get_instance
+from inference import *
+
+
+def main(config, ckpt, infile, outfile, T):
+    device = torch.device('cuda')
+    trainer_config = config['trainer']
+    ckpt_dict = torch.load(ckpt, map_location=device)
+    n_fft = trainer_config['n_fft']
+    hop_length = trainer_config['hop_length']
+    n_mels = trainer_config['n_mels']
+    sr = trainer_config['sr']
+    train_T = trainer_config['train_T']
+    model = get_instance(module_arch, config['arch']).to(device)
+    noise_scheduler = module_arch.NoiseScheduler().to(device)
+    mel_spec = module_arch.MelSpec(sr, n_fft, hop_length=hop_length,
+                                   f_min=20, f_max=8000, n_mels=n_mels).to(device)
+    model.load_state_dict(ckpt_dict['ema_model'])
+    noise_scheduler.load_state_dict(ckpt_dict['noise_scheduler'])
+    model.eval()
+    noise_scheduler.eval()
+
+    y, sr = torchaudio.load(infile)
+    y = y.mean(0, keepdim=True).to(device)
+    mels = mel_spec(y)
+
+    z_1 = torch.randn_like(y)
+
+    if train_T:
+        steps = torch.linspace(0, train_T, T + 1,
+                               device=device).round().long()
+        gamma, _ = noise_scheduler(steps / train_T)
+    else:
+        steps = torch.linspace(0, 1, T + 1, device=device)
+        gamma, _ = noise_scheduler(steps)
+
+    with torch.no_grad():
+        z_0 = reverse_process_new(z_1, mels, gamma, steps, model)
+
+    x = z_0.squeeze().clip(-0.99, 0.99)
+    torchaudio.save(outfile, x.unsqueeze(0).cpu(), sr)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Inferencer')
+    parser.add_argument('config', type=str, help='config file')
+    parser.add_argument('ckpt', type=str)
+    parser.add_argument('infile', type=str)
+    parser.add_argument('outfile', type=str)
+    parser.add_argument('-T', type=int, default=20)
+    args = parser.parse_args()
+
+    config = json.load(open(args.config))
+    main(config, args.ckpt, args.infile, args.outfile, args.T)
