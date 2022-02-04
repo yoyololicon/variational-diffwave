@@ -1,6 +1,5 @@
 import torch
 from torch import nn
-from torch.autograd import grad
 import torch.nn.utils.parametrize as parametrize
 
 
@@ -22,26 +21,27 @@ class NoiseScheduler(nn.Module):
 
         self.gamma1 = nn.Parameter(torch.ones(1) * 0, requires_grad=True)
         self.gamma0 = nn.Parameter(torch.ones(1) * -10, requires_grad=True)
+        self.register_buffer('t01', torch.tensor([0., 1.]))
 
     def gamma_hat(self, t: torch.Tensor):
         l1 = self.l1(t)
         return l1 + self.l3(self.l2(l1).sigmoid())
 
     def forward(self, t: torch.Tensor):
-        t = t.clamp(0, 1).unsqueeze(-1)
-        max_gamma_hat = self.gamma_hat(torch.ones_like(t))
-        min_gamma_hat = self.gamma_hat(torch.zeros_like(t))
-        gamma_hat = self.gamma_hat(t)
+        t = t.clamp(0, 1)
+        min_gamma_hat, max_gamma_hat,  gamma_hat = self.gamma_hat(
+            torch.cat([self.t01, t], dim=0).unsqueeze(-1)).squeeze(1).split([1, 1, t.numel()], dim=0)
         gamma0, gamma1 = self.gamma0, self.gamma1
         normalized_gamma_hat = (gamma_hat - min_gamma_hat) / \
             (max_gamma_hat - min_gamma_hat)
         # gamma = gamma_hat
         gamma = gamma0 + (gamma1 - gamma0) * normalized_gamma_hat
 
-        return gamma.squeeze(1), normalized_gamma_hat.squeeze(1)
+        return gamma, normalized_gamma_hat
 
 
 if __name__ == '__main__':
+    from torch.autograd import grad
     gamma = NoiseScheduler()
 
     t = torch.arange(10) / 9
