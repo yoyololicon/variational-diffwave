@@ -1,5 +1,6 @@
 import torch
 from torch import nn, Tensor
+import torch.nn.functional as F
 
 
 def remove_weight_norms(m):
@@ -28,3 +29,8 @@ def snr2as(snr: Tensor):
 def gamma2as(g: Tensor):
     var = g.sigmoid()
     return (1 - var).sqrt(), var
+
+
+def gamma2logas(g: Tensor):
+    log_var = -F.softplus(-g)
+    return 0.5 * (-g + log_var), log_var

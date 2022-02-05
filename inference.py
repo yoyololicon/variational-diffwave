@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch.cuda import amp
 from tqdm import tqdm
-from utils.utils import gamma2snr, snr2as, gamma2as
+from utils.utils import gamma2snr, snr2as, gamma2as, gamma2logas
 
 
 def reverse_process(z_1, mels, gamma, steps, model, with_amp=False):
@@ -39,7 +39,9 @@ def reverse_process(z_1, mels, gamma, steps, model, with_amp=False):
 
 
 def reverse_process_new(z_1, mels, gamma, steps, model, with_amp=False):
-    alpha, var = gamma2as(gamma)
+    log_alpha, log_var = gamma2logas(gamma)
+    var = log_var.exp()
+    alpha_st = torch.exp(log_alpha[:-1] - log_alpha[1:])
     c = -torch.expm1(gamma[:-1] - gamma[1:])
     c.relu_()
 
@@ -50,8 +52,7 @@ def reverse_process_new(z_1, mels, gamma, steps, model, with_amp=False):
         with amp.autocast(enabled=with_amp):
             noise_hat = model(z_t, mels, steps[t:t+1])
         noise_hat = noise_hat.float()
-        alpha_st = alpha[s] / alpha[t]
-        mu = (z_t - var[t].sqrt() * c[s] * noise_hat) * alpha_st
+        mu = (z_t - var[t].sqrt() * c[s] * noise_hat) * alpha_st[s]
         z_t = mu
         if s:
             z_t += (var[s] * c[s]).sqrt() * torch.randn_like(z_t)
