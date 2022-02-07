@@ -23,7 +23,7 @@ def main(config, ckpt, infile, outfile, T):
     mel_spec = module_arch.MelSpec(sr, n_fft, hop_length=hop_length,
                                    f_min=20, f_max=8000, n_mels=n_mels).to(device)
     model.load_state_dict(ckpt_dict['ema_model'])
-    noise_scheduler.load_state_dict(ckpt_dict['noise_scheduler'])
+    noise_scheduler.load_state_dict(ckpt_dict['noise_scheduler'], strict=False)
     model.eval()
     noise_scheduler.eval()
 
@@ -39,7 +39,7 @@ def main(config, ckpt, infile, outfile, T):
         gamma, _ = noise_scheduler(steps / train_T)
     else:
         steps = torch.linspace(0, 1, T + 1, device=device)
-        gamma, _ = noise_scheduler(steps)
+        gamma, steps = noise_scheduler(steps)
 
     with torch.no_grad():
         z_0 = reverse_process_new(z_1, mels, gamma, steps, model)
