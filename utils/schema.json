@@ -114,7 +114,6 @@
                 "train_T",
                 "eval_T",
                 "extra_monitor",
-                "minimize_var",
                 "with_amp"
             ]
         }
