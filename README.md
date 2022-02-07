@@ -15,4 +15,4 @@ python train_distributed.py discrete_1000steps_64ch.json
 
 ## TODO 
 
-- [ ] Continuous-time training.
+- [x] Continuous-time training.
