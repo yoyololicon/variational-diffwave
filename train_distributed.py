@@ -25,11 +25,11 @@ import torch_optimizer
 
 
 from utils.schema import CONFIG_SCHEMA
-from utils.utils import get_instance, gamma2snr, snr2as, gamma2as
+from utils.utils import gamma2logas, get_instance, gamma2snr, snr2as, gamma2as
 import models as module_arch
 import datasets as module_data
 import loss as module_loss
-from inference import reverse_process
+from inference import reverse_process, reverse_process_new
 
 
 def get_dataflow(config: dict):
@@ -92,7 +92,6 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer: ZeroRedundancyOp
     save_dir = trainer_config['save_dir']
     eval_interval = trainer_config['eval_interval']
     train_T = trainer_config['train_T']
-    minimize_var = trainer_config['minimize_var']
     with_amp = trainer_config['with_amp']
 
     rank = idist.get_rank()
@@ -145,10 +144,13 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer: ZeroRedundancyOp
                 gamma_t, gamma_hat = noise_scheduler(t)
                 gamma_hat.retain_grad()
 
-                alpha_t, var_t = gamma2as(gamma_t)
-                z_t = alpha_t[:, None] * x + var_t.sqrt()[:, None] * noise
+                # alpha_t, var_t = gamma2as(gamma_t)
+                log_alpha_t, log_var_t = gamma2logas(gamma_t)
+                alpha_t, std_t = torch.exp(
+                    log_alpha_t), torch.exp(log_var_t * 0.5)
+                z_t = alpha_t[:, None] * x + std_t[:, None] * noise
 
-                noise_hat = model(z_t, mels, t.detach())
+                noise_hat = model(z_t, mels, gamma_hat)
                 d_gamma_t, *_ = grad(gamma_t.sum(), t, create_graph=True)
                 loss, extra_dict = criterion(
                     base_noise_scheduler.gamma0,
@@ -158,7 +160,7 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer: ZeroRedundancyOp
 
                 loss_T_raw = extra_dict['loss_T_raw']
                 handle = gamma_hat.register_hook(
-                    lambda grad: 2 * grad * loss_T_raw)
+                    lambda grad: 2 * grad * loss_T_raw.to(grad.dtype))
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -307,10 +309,10 @@ def training(local_rank, config: dict):
                 gamma, _ = noise_scheduler(steps / train_T)
             else:
                 steps = torch.linspace(0, 1, eval_T + 1, device=device)
-                gamma, _ = noise_scheduler(steps)
+                gamma, steps = noise_scheduler(steps)
 
-            z_0 = reverse_process(z_1, eval_mels, gamma,
-                                  steps, ema_model, with_amp=with_amp)
+            z_0 = reverse_process_new(z_1, eval_mels, gamma,
+                                      steps, ema_model, with_amp=with_amp)
 
             predict = z_0.squeeze().clip(-0.99, 0.99)
             tb_logger.writer.add_audio(
