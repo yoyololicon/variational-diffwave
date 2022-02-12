@@ -2,3 +2,4 @@
 *tfevents.*
 *.pt
 *.pth
+generated/*
