@@ -122,13 +122,13 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer: ZeroRedundancyOp
 
             t, s = t_idx / train_T, s_idx / train_T
             with amp.autocast(enabled=with_amp):
-                gamma_ts, _ = noise_scheduler(torch.cat([t, s], dim=0))
+                gamma_ts, gamma_hat = noise_scheduler(torch.cat([t, s], dim=0))
                 gamma_t, gamma_s = gamma_ts[:N], gamma_ts[N:]
                 alpha_t, var_t = gamma2as(gamma_t)
 
                 z_t = alpha_t[:, None] * x + var_t.sqrt()[:, None] * noise
 
-                noise_hat = model(z_t, mels, t_idx)
+                noise_hat = model(z_t, mels, gamma_hat[:N])
 
                 loss, extra_dict = criterion(
                     base_noise_scheduler.gamma0,
@@ -306,7 +306,7 @@ def training(local_rank, config: dict):
             if train_T:
                 steps = torch.linspace(0, train_T, eval_T + 1,
                                        device=device).round().long()
-                gamma, _ = noise_scheduler(steps / train_T)
+                gamma, steps = noise_scheduler(steps / train_T)
             else:
                 steps = torch.linspace(0, 1, eval_T + 1, device=device)
                 gamma, steps = noise_scheduler(steps)
