@@ -54,6 +54,8 @@
             "ll",
             "loss_T"
         ],
-        "with_amp": true
+        "with_amp": true,
+        "max_log_snr": 23,
+        "min_log_snr": -3.6
     }
 }

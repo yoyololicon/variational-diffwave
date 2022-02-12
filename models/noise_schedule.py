@@ -40,6 +40,29 @@ class NoiseScheduler(nn.Module):
         return gamma, normalized_gamma_hat
 
 
+class CosineScheduler(nn.Module):
+    def __init__(self, gamma0: float = -23, gamma1: float = 3.6):
+        super().__init__()
+
+        self.register_buffer('gamma0', torch.tensor(gamma0))
+        self.register_buffer('gamma1', torch.tensor(gamma1))
+
+    def schedule(self, t: torch.Tensor):
+        return torch.tan(torch.pi * t * 0.5).reciprocal_().pow(2)
+
+    def gamma2t(self, gamma: torch.Tensor):
+        return 2 * torch.atan(gamma.mul(0.5).exp()) / torch.pi
+
+    def forward(self, t: torch.Tensor):
+        min_t = self.gamma2t(self.gamma0)
+        max_t = self.gamma2t(self.gamma1)
+        t = min_t + (max_t - min_t) * t.clamp(0, 1)
+
+        snr = self.schedule(t)
+        r = -snr.log()
+        return r, torch.clip_((r - self.gamma0) / (self.gamma1 - self.gamma0), 0, 1)
+
+
 if __name__ == '__main__':
     from torch.autograd import grad
     gamma = NoiseScheduler()

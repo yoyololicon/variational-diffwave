@@ -9,7 +9,7 @@ from utils.utils import get_instance
 from inference import *
 
 
-def main(config, ckpt, infile, outfile, T):
+def main(config, ckpt, infile, outfile, T, amp):
     device = torch.device('cuda')
     trainer_config = config['trainer']
     ckpt_dict = torch.load(ckpt, map_location=device)
@@ -19,13 +19,21 @@ def main(config, ckpt, infile, outfile, T):
     sr = trainer_config['sr']
     train_T = trainer_config['train_T']
     model = get_instance(module_arch, config['arch']).to(device)
-    noise_scheduler = module_arch.NoiseScheduler().to(device)
     mel_spec = module_arch.MelSpec(sr, n_fft, hop_length=hop_length,
                                    f_min=20, f_max=8000, n_mels=n_mels).to(device)
     model.load_state_dict(ckpt_dict['ema_model'])
-    noise_scheduler.load_state_dict(ckpt_dict['noise_scheduler'], strict=False)
+
+    if 'noise_scheduler' in ckpt_dict:
+        noise_scheduler = module_arch.NoiseScheduler().to(device)
+        noise_scheduler.load_state_dict(
+            ckpt_dict['noise_scheduler'], strict=False)
+        noise_scheduler.eval()
+    else:
+        max_log_snr = trainer_config['max_log_snr']
+        min_log_snr = trainer_config['min_log_snr']
+        noise_scheduler = module_arch.CosineScheduler(
+            gamma0=-max_log_snr, gamma1=-min_log_snr).to(device)
     model.eval()
-    noise_scheduler.eval()
 
     y, sr = torchaudio.load(infile)
     y = y.mean(0, keepdim=True).to(device)
@@ -36,13 +44,13 @@ def main(config, ckpt, infile, outfile, T):
     if train_T:
         steps = torch.linspace(0, train_T, T + 1,
                                device=device).round().long()
-        gamma, _ = noise_scheduler(steps / train_T)
+        gamma, steps = noise_scheduler(steps / train_T)
     else:
         steps = torch.linspace(0, 1, T + 1, device=device)
         gamma, steps = noise_scheduler(steps)
 
     with torch.no_grad():
-        z_0 = reverse_process_new(z_1, mels, gamma, steps, model)
+        z_0 = reverse_process_new(z_1, mels, gamma, steps, model, with_amp=amp)
 
     x = z_0.squeeze().clip(-0.99, 0.99)
     torchaudio.save(outfile, x.unsqueeze(0).cpu(), sr)
@@ -55,7 +63,8 @@ if __name__ == '__main__':
     parser.add_argument('infile', type=str)
     parser.add_argument('outfile', type=str)
     parser.add_argument('-T', type=int, default=20)
+    parser.add_argument('--amp', action='store_true')
     args = parser.parse_args()
 
     config = json.load(open(args.config))
-    main(config, args.ckpt, args.infile, args.outfile, args.T)
+    main(config, args.ckpt, args.infile, args.outfile, args.T, args.amp)
