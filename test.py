@@ -9,7 +9,7 @@ from utils.utils import get_instance
 from inference import *
 
 
-def main(config, ckpt, infile, outfile, T, amp):
+def main(config, ckpt, infile, outfile, T, amp, deterministic):
     device = torch.device('cuda')
     trainer_config = config['trainer']
     ckpt_dict = torch.load(ckpt, map_location=device)
@@ -50,7 +50,10 @@ def main(config, ckpt, infile, outfile, T, amp):
         gamma, steps = noise_scheduler(steps)
 
     with torch.no_grad():
-        z_0 = reverse_process_new(z_1, mels, gamma, steps, model, with_amp=amp)
+        if deterministic:
+            z_0 = reverse_process_ddim(z_1, mels, gamma, steps, model, with_amp=amp)
+        else:
+            z_0 = reverse_process_new(z_1, mels, gamma, steps, model, with_amp=amp)
 
     x = z_0.squeeze().clip(-0.99, 0.99)
     torchaudio.save(outfile, x.unsqueeze(0).cpu(), sr)
@@ -64,7 +67,8 @@ if __name__ == '__main__':
     parser.add_argument('outfile', type=str)
     parser.add_argument('-T', type=int, default=20)
     parser.add_argument('--amp', action='store_true')
+    parser.add_argument('--ddim', action='store_true')
     args = parser.parse_args()
 
     config = json.load(open(args.config))
-    main(config, args.ckpt, args.infile, args.outfile, args.T, args.amp)
+    main(config, args.ckpt, args.infile, args.outfile, args.T, args.amp, args.ddim)

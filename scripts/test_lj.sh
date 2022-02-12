@@ -9,5 +9,5 @@ do
     base="$(basename -- $f)"
     out=generated/$base
     echo "$out, $f"
-    python test.py $1 $2 $f $out -T $3 --amp
+    python test.py $1 $2 $f $out -T $3 --amp --ddim
 done

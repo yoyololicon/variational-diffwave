@@ -5,7 +5,7 @@ from tqdm import tqdm
 from utils.utils import gamma2snr, snr2as, gamma2as, gamma2logas
 
 
-def reverse_process_new(z_1, mels, gamma, steps, model, with_amp=False, deterministic=False):
+def reverse_process_new(z_1, mels, gamma, steps, model, with_amp=False):
     log_alpha, log_var = gamma2logas(gamma)
     var = log_var.exp()
     alpha_st = torch.exp(log_alpha[:-1] - log_alpha[1:])
@@ -21,14 +21,14 @@ def reverse_process_new(z_1, mels, gamma, steps, model, with_amp=False, determin
         noise_hat = noise_hat.float()
         mu = (z_t - var[t].sqrt() * c[s] * noise_hat) * alpha_st[s]
         z_t = mu
-        if s and not deterministic:
+        if s:
             z_t += (var[s] * c[s]).sqrt() * torch.randn_like(z_t)
 
     return z_t
 
 
 def reverse_process_ddim(z_1, mels, gamma, steps, model, with_amp=False):
-    Pm1 = torch.expm1(gamma[:-1] - gamma[1:])
+    Pm1 = -torch.expm1((gamma[1:] - gamma[:-1]) * 0.5)
     log_alpha, log_var = gamma2logas(gamma)
     alpha_st = torch.exp(log_alpha[:-1] - log_alpha[1:])
     std = log_var.mul(0.5).exp()
@@ -40,6 +40,6 @@ def reverse_process_ddim(z_1, mels, gamma, steps, model, with_amp=False):
         with amp.autocast(enabled=with_amp):
             noise_hat = model(z_t, mels, steps[t:t+1])
         noise_hat = noise_hat.float()
-        z_t.add_(Pm1[s] * std[s] * noise_hat).mul_(alpha_st[s])
+        z_t.mul_(alpha_st[s]).add_(std[s] * Pm1[s] * noise_hat)
 
     return z_t
