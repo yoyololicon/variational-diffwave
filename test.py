@@ -2,7 +2,7 @@ import argparse
 import json
 import torch
 import torchaudio
-
+from functools import partial
 
 import models as module_arch
 from utils.utils import get_instance
@@ -49,11 +49,13 @@ def main(config, ckpt, infile, outfile, T, amp, deterministic):
         steps = torch.linspace(0, 1, T + 1, device=device)
         gamma, steps = noise_scheduler(steps)
 
+    infer_func = partial(model, spectrogram=mels)
+
     with torch.no_grad():
         if deterministic:
-            z_0 = reverse_process_ddim(z_1, mels, gamma, steps, model, with_amp=amp)
+            z_0 = reverse_process_ddim(z_1, gamma, steps, infer_func, with_amp=amp)
         else:
-            z_0 = reverse_process_new(z_1, mels, gamma, steps, model, with_amp=amp)
+            z_0 = reverse_process_new(z_1, gamma, steps, infer_func, with_amp=amp)
 
     x = z_0.squeeze().clip(-0.99, 0.99)
     torchaudio.save(outfile, x.unsqueeze(0).cpu(), sr)

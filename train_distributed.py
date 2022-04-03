@@ -22,6 +22,7 @@ from ignite.contrib.handlers.tensorboard_logger import *
 from ignite.contrib.engines import common
 from ignite import distributed as idist
 import torch_optimizer
+from functools import partial
 
 
 from utils.schema import CONFIG_SCHEMA
@@ -29,7 +30,7 @@ from utils.utils import gamma2logas, get_instance, gamma2snr, snr2as, gamma2as
 import models as module_arch
 import datasets as module_data
 import loss as module_loss
-from inference import reverse_process, reverse_process_new
+from inference import reverse_process_new
 
 
 def get_dataflow(config: dict):
@@ -128,7 +129,7 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer: ZeroRedundancyOp
 
                 z_t = alpha_t[:, None] * x + var_t.sqrt()[:, None] * noise
 
-                noise_hat = model(z_t, mels, gamma_hat[:N])
+                noise_hat = model(z_t, gamma_hat[:N], mels)
 
                 loss, extra_dict = criterion(
                     base_noise_scheduler.gamma0,
@@ -150,7 +151,7 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer: ZeroRedundancyOp
                     log_alpha_t), torch.exp(log_var_t * 0.5)
                 z_t = alpha_t[:, None] * x + std_t[:, None] * noise
 
-                noise_hat = model(z_t, mels, gamma_hat)
+                noise_hat = model(z_t, gamma_hat, mels)
                 d_gamma_t, *_ = grad(gamma_t.sum(), t, create_graph=True)
                 loss, extra_dict = criterion(
                     base_noise_scheduler.gamma0,
@@ -311,8 +312,9 @@ def training(local_rank, config: dict):
                 steps = torch.linspace(0, 1, eval_T + 1, device=device)
                 gamma, steps = noise_scheduler(steps)
 
-            z_0 = reverse_process_new(z_1, eval_mels, gamma,
-                                      steps, ema_model, with_amp=with_amp)
+            infer_func = partial(ema_model, spectrogram=eval_mels)
+            z_0 = reverse_process_new(z_1, gamma,
+                                      steps, infer_func, with_amp=with_amp)
 
             predict = z_0.squeeze().clip(-0.99, 0.99)
             tb_logger.writer.add_audio(
