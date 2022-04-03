@@ -101,10 +101,12 @@ class ResidualBlock(nn.Module):
             self.output_projection = nn.Conv1d(
                 residual_channels, residual_channels * 2, 1)
 
-    def forward(self, x, conditioner, diffusion_step):
+    def forward(self, x, diffusion_step, conditioner=None):
         diffusion_step = self.diffusion_projection(
             diffusion_step).unsqueeze(-1)
-        y = self.dilated_conv(x + diffusion_step) + conditioner
+        y = self.dilated_conv(x + diffusion_step)
+        if conditioner is not None:
+            y = y + conditioner
         y = gru(y)
         *residual, skip = self.output_projection(y).split(self.chs_split, 1)
         return (x + residual[0]) / sqrt(2.0) if len(residual) else None, skip
@@ -143,7 +145,7 @@ class DiffWave(nn.Module):
         self.conditioner = nn.Conv1d(
             n_mels, res_channels * 2 * layers, 1, bias=False)
 
-    def forward(self, audio, spectrogram, diffusion_step):
+    def forward(self, audio, diffusion_step, spectrogram):
         x = audio.unsqueeze(1)
         x = self.input_projection(x)
 
@@ -155,7 +157,48 @@ class DiffWave(nn.Module):
             len(self.residual_layers), 1)
         skip = 0
         for layer, c in zip(self.residual_layers, condition):
-            x, skip_connection = layer(x, c, diffusion_step)
+            x, skip_connection = layer(x, diffusion_step, c)
+            skip += skip_connection
+
+        x = skip / sqrt(len(self.residual_layers))
+        x = self.output_projection(x).squeeze(1)
+        return x
+
+
+class UnconditionalDiffWave(nn.Module):
+    def __init__(self,
+                 res_channels: int = 64,
+                 T: int = 50,
+                 layers: int = 30,
+                 cycle_length: int = 10
+                 ):
+        super().__init__()
+
+        self.input_projection = nn.Sequential(
+            nn.Conv1d(1, res_channels, 1),
+            nn.ReLU(inplace=True)
+        )
+        self.diffusion_embedding = DiffusionEmbedding(T)
+
+        dilations = [2 ** (i % cycle_length) for i in range(layers)]
+        self.residual_layers = nn.ModuleList([
+            ResidualBlock(res_channels, d) for d in dilations
+        ])
+
+        self.output_projection = nn.Sequential(
+            nn.Conv1d(res_channels, res_channels, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(res_channels, 1, 1)
+        )
+
+    def forward(self, audio, diffusion_step):
+        x = audio.unsqueeze(1)
+        x = self.input_projection(x)
+        diffusion_step = self.diffusion_embedding(diffusion_step)
+
+        skip = 0
+        for layer in self.residual_layers:
+            x, skip_connection = layer(x, diffusion_step)
             skip += skip_connection
 
         x = skip / sqrt(len(self.residual_layers))
