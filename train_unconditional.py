@@ -50,7 +50,7 @@ def initialize(config: dict, device):
     return model, optimizer, scheduler
 
 
-def create_trainer(model, mel_spec, noise_scheduler, optimizer: ZeroRedundancyOptimizer, scheduler, device, trainer_config, train_sampler, checkpoint_path: str):
+def create_trainer(model, noise_scheduler, optimizer: ZeroRedundancyOptimizer, scheduler, device, trainer_config, train_sampler, checkpoint_path: str):
     save_dir = trainer_config['save_dir']
     eval_interval = trainer_config['eval_interval']
     with_amp = trainer_config['with_amp']
@@ -66,7 +66,6 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer: ZeroRedundancyOp
         x = batch
         x = x.to(device)
         noise = torch.randn_like(x)
-        mels = mel_spec(x)
 
         N = x.shape[0]
 
@@ -79,7 +78,7 @@ def create_trainer(model, mel_spec, noise_scheduler, optimizer: ZeroRedundancyOp
             alpha, var = gamma2as(gamma_t)
             z_t = alpha[:, None] * x + var.sqrt()[:, None] * noise
 
-            noise_hat = model(z_t, mels, t)
+            noise_hat = model(z_t, t)
             loss = 0.5 * F.mse_loss(noise_hat, noise) * \
                 (noise_scheduler.gamma1 - noise_scheduler.gamma0)
 
@@ -184,10 +183,7 @@ def training(local_rank, config: dict):
     trainer_config = config['trainer']
 
     log_dir = trainer_config['log_dir']
-    eval_file = trainer_config['eval_file']
-    n_fft = trainer_config['n_fft']
-    hop_length = trainer_config['hop_length']
-    n_mels = trainer_config['n_mels']
+    eval_dur = trainer_config['eval_dur']
     sr = trainer_config['sr']
     eval_interval = trainer_config['eval_interval']
     eval_T = trainer_config['eval_T']
@@ -201,10 +197,7 @@ def training(local_rank, config: dict):
     noise_scheduler = module_arch.CosineScheduler(
         gamma0=-max_log_snr, gamma1=-min_log_snr).to(device)
 
-    mel_spec = module_arch.MelSpec(sr, n_fft, hop_length=hop_length,
-                                   f_min=20, f_max=8000, n_mels=n_mels).to(device)
-
-    trainer, ema_model = create_trainer(model, mel_spec, noise_scheduler, optimizer,
+    trainer, ema_model = create_trainer(model, noise_scheduler, optimizer,
                                         scheduler, device, trainer_config, train_loader.sampler,
                                         checkpoint_path)
 
@@ -214,10 +207,9 @@ def training(local_rank, config: dict):
         for test_input in train_loader:
             break
         test_input = test_input[:1].to(device)
-        test_mels = mel_spec(test_input)
         t = torch.tensor([0.], device=device)
         summary(ema_model,
-                input_data=(test_input, test_mels, t),
+                input_data=(test_input, t),
                 device=device,
                 col_names=("input_size", "output_size", "num_params", "kernel_size",
                            "mult_adds"),
@@ -227,26 +219,21 @@ def training(local_rank, config: dict):
         tb_logger = get_logger(trainer, model, optimizer,
                                log_dir, model_name, eval_interval)
 
-        eval_x, eval_sr = torchaudio.load(os.path.expanduser(eval_file))
-        assert sr == eval_sr
-        eval_x = eval_x.mean(0).to(device).unsqueeze(0)
-        eval_mels = mel_spec(eval_x)
-
         @torch.no_grad()
-        def predict_samples(engine):
-            z_1 = torch.randn_like(eval_x)
+        def generate_samples(engine):
+            z_1 = torch.randn(1, sr * eval_dur, device=device)
             steps = torch.linspace(0, 1, eval_T + 1, device=device)
             gamma, steps = noise_scheduler(steps)
 
-            z_0 = reverse_process_new(z_1, eval_mels, gamma,
+            z_0 = reverse_process_new(z_1, gamma,
                                       steps, ema_model, with_amp=with_amp)
 
-            predict = z_0.squeeze().clip(-0.99, 0.99)
+            generated = z_0.squeeze().clip(-0.99, 0.99)
             tb_logger.writer.add_audio(
-                'predict', predict, engine.state.iteration, sample_rate=sr)
+                'generated', generated, engine.state.iteration, sample_rate=sr)
 
         trainer.add_event_handler(Events.ITERATION_COMPLETED(
-            every=eval_interval), predict_samples)
+            every=eval_interval), generate_samples)
 
     e = trainer.run(train_loader, max_epochs=1)
 
@@ -256,7 +243,7 @@ def training(local_rank, config: dict):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description='DiffWave Fixed-Noise Training')
+        description='Unconditional DiffWave Fixed-Noise Training')
     parser.add_argument('config', type=str, help='config file')
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='training checkpoint')
@@ -264,7 +251,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     config = json.load(open(args.config))
-    validate(config, schema=CONFIG_SCHEMA)
+    # validate(config, schema=CONFIG_SCHEMA)
 
     args_dict = vars(args)
     config.update(args_dict)

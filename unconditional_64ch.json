@@ -1,0 +1,51 @@
+{
+    "name": "UnconditionalDiffWave",
+    "arch": {
+        "type": "UnconditionalDiffWave",
+        "args": {
+            "T": 1000
+        }
+    },
+    "dataset": {
+        "type": "RandomWAVDataset",
+        "args": {
+            "data_dir": "~/data-disk/Datasets/LJ/LJSpeech-1.1/wavs/",
+            "size": 16000000,
+            "segment": 16000,
+            "deterministic": false
+        }
+    },
+    "optimizer": {
+        "type": "Adam",
+        "args": {
+            "lr": 2e-4
+        }
+    },
+    "lr_scheduler": {
+        "type": "ReduceLROnPlateau",
+        "args": {
+            "factor": 0.3,
+            "patience": 1000000,
+            "verbose": true
+        }
+    },
+    "data_loader": {
+        "batch_size": 16,
+        "shuffle": false,
+        "drop_last": false,
+        "num_workers": 4,
+        "prefetch_factor": 4,
+        "pin_memory": true
+    },
+    "trainer": {
+        "save_dir": "saved/",
+        "log_dir": "runs/",
+        "eval_dur": 3,
+        "sr": 22050,
+        "eval_interval": 10000,
+        "eval_T": 50,
+        "with_amp": true,
+        "max_log_snr": 23,
+        "min_log_snr": -3.6
+    }
+}
