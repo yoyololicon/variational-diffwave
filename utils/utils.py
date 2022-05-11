@@ -34,3 +34,10 @@ def gamma2as(g: Tensor):
 def gamma2logas(g: Tensor):
     log_var = -F.softplus(-g)
     return 0.5 * (-g + log_var), log_var
+
+
+def beta2gamma(beta: Tensor):
+    alpha = 1 - beta
+    log_alpha = torch.log(alpha)
+    log_alpha_hat = log_alpha.cumsum(dim=0)
+    return torch.log(-torch.expm1(log_alpha_hat)) - log_alpha_hat
