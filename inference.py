@@ -5,7 +5,7 @@ from tqdm import tqdm
 from utils.utils import gamma2snr, snr2as, gamma2as, gamma2logas
 
 
-def reverse_process_new(z_1, gamma, steps, model, with_amp=False):
+def reverse_process_new(z_1, gamma, steps, model, *condition, with_amp=False):
     log_alpha, log_var = gamma2logas(gamma)
     var = log_var.exp()
     alpha_st = torch.exp(log_alpha[:-1] - log_alpha[1:])
@@ -17,7 +17,7 @@ def reverse_process_new(z_1, gamma, steps, model, with_amp=False):
     for t in tqdm(range(T, 0, -1)):
         s = t - 1
         with amp.autocast(enabled=with_amp):
-            noise_hat = model(z_t, steps[t:t+1])
+            noise_hat = model(z_t, steps[t:t+1], *condition)
         noise_hat = noise_hat.float()
         mu = (z_t - var[t].sqrt() * c[s] * noise_hat) * alpha_st[s]
         z_t = mu
