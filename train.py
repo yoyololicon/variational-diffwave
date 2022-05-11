@@ -1,41 +1,70 @@
+import importlib
 import torch
 from torch import optim, nn
 from torch.autograd import grad
 from torch.cuda import amp
 from torch.distributed.optim import ZeroRedundancyOptimizer
-import torchaudio
 from torchinfo import summary
-import argparse
-import json
 import matplotlib.pyplot as plt
 import os
-from random import randrange, sample, uniform
-from jsonschema import validate
+from datetime import datetime
+from random import uniform
 from ignite.engine import Engine, Events
 from ignite.handlers import Checkpoint, EMAHandler
 from ignite.contrib.handlers.tensorboard_logger import *
 from ignite.contrib.engines import common
 from ignite import distributed as idist
+import hydra
+from omegaconf import DictConfig, OmegaConf
+from hydra.core.hydra_config import HydraConfig
+from itertools import chain
+from contiguous_params import ContiguousParams
 
-
-from utils.schema import CONFIG_SCHEMA
 from utils.utils import gamma2logas, get_instance, gamma2snr, snr2as, gamma2as
-import loss as module_loss
+from loss import diffusion_elbo
 from inference import reverse_process_new
+from models import NoiseScheduler
+import datasets
 
-from train_distributed import get_dataflow, initialize, get_logger
+
+def get_logger(trainer, model, noise_scheduler, optimizer, log_dir, model_name):
+    # Create a logger
+    # start_time = datetime.now().strftime('%m%d_%H%M%S')
+    tb_logger = common.setup_tb_logging(
+        output_path=log_dir,
+        trainer=trainer,
+        optimizers=optimizer,
+        log_every_iters=1
+    )
+
+    tb_logger.attach(
+        trainer,
+        event_name=Events.EPOCH_COMPLETED,
+        log_handler=WeightsHistHandler(model)
+    )
+    tb_logger.attach(
+        trainer,
+        event_name=Events.EPOCH_COMPLETED,
+        log_handler=WeightsHistHandler(noise_scheduler)
+    )
+
+    return tb_logger
 
 
-def create_trainer(model, noise_scheduler, optimizer: ZeroRedundancyOptimizer, criterion, scheduler, device, trainer_config, train_sampler, checkpoint_path: str):
-    extra_monitor = trainer_config['extra_monitor']
-    save_dir = trainer_config['save_dir']
-    eval_interval = trainer_config['eval_interval']
-    train_T = trainer_config['train_T']
-    with_amp = trainer_config['with_amp']
-
+def create_trainer(model: nn.Module,
+                   noise_scheduler: nn.Module,
+                   optimizer: ZeroRedundancyOptimizer,
+                   scheduler: optim.lr_scheduler._LRScheduler,
+                   device: torch.device,
+                   cfg: DictConfig,
+                   train_sampler,
+                   checkpoint_path: str):
     rank = idist.get_rank()
 
-    scaler = amp.GradScaler(enabled=with_amp)
+    is_reduce_on_plateau = isinstance(
+        scheduler, optim.lr_scheduler.ReduceLROnPlateau)
+
+    scaler = amp.GradScaler(enabled=cfg.with_amp)
 
     if isinstance(noise_scheduler, nn.parallel.DistributedDataParallel) or isinstance(noise_scheduler, nn.parallel.DataParallel):
         base_noise_scheduler = noise_scheduler.module
@@ -47,20 +76,21 @@ def create_trainer(model, noise_scheduler, optimizer: ZeroRedundancyOptimizer, c
         noise_scheduler.train()
         optimizer.zero_grad()
 
-        x, *c = batch
-        x = x.to(device)
-        c = tuple(c_i.to(device) for c_i in c)
+        batch_on_device = [b.to(device) for b in batch]
+        x, *c = batch_on_device
         noise = torch.randn_like(x)
 
         N = x.shape[0]
-        if train_T:
+        handle = None
+        if cfg.train_T > 0:
+            T = cfg.train_T
             s = torch.remainder(
                 uniform(0, 1) + torch.arange(N, device=device) / N, 1.)
-            s_idx = (s * train_T).long()
+            s_idx = (s * T).long()
             t_idx = s_idx + 1
 
-            t, s = t_idx / train_T, s_idx / train_T
-            with amp.autocast(enabled=with_amp):
+            t, s = t_idx / T, s_idx / T
+            with amp.autocast(enabled=cfg.with_amp):
                 gamma_ts, gamma_hat = noise_scheduler(torch.cat([t, s], dim=0))
                 gamma_t, gamma_s = gamma_ts[:N], gamma_ts[N:]
                 alpha_t, var_t = gamma2as(gamma_t)
@@ -69,17 +99,17 @@ def create_trainer(model, noise_scheduler, optimizer: ZeroRedundancyOptimizer, c
 
                 noise_hat = model(z_t, gamma_hat[:N], *c)
 
-                loss, extra_dict = criterion(
+                loss, extra_dict = diffusion_elbo(
                     base_noise_scheduler.gamma0,
                     base_noise_scheduler.gamma1,
-                    torch.expm1(gamma_t - gamma_s) * train_T,
+                    torch.expm1(gamma_t - gamma_s) * T,
                     x, noise, noise_hat)
         else:
             t = torch.remainder(
                 uniform(0, 1) + torch.arange(N, device=device) / N, 1.)
             t = t.clone().detach().requires_grad_(True)
 
-            with amp.autocast(enabled=with_amp):
+            with amp.autocast(enabled=cfg.with_amp):
                 gamma_t, gamma_hat = noise_scheduler(t)
                 gamma_hat.retain_grad()
 
@@ -91,7 +121,7 @@ def create_trainer(model, noise_scheduler, optimizer: ZeroRedundancyOptimizer, c
                 noise_hat = model(z_t, gamma_hat, *c)
 
                 d_gamma_t, *_ = grad(gamma_t.sum(), t, create_graph=True)
-                loss, extra_dict = criterion(
+                loss, extra_dict = diffusion_elbo(
                     base_noise_scheduler.gamma0,
                     base_noise_scheduler.gamma1,
                     d_gamma_t,
@@ -105,7 +135,7 @@ def create_trainer(model, noise_scheduler, optimizer: ZeroRedundancyOptimizer, c
         scaler.step(optimizer)
         scaler.update()
 
-        if not train_T:
+        if handle is not None:
             handle.remove()
         result = {'loss': loss.item()}
         result.update(extra_dict)
@@ -113,33 +143,23 @@ def create_trainer(model, noise_scheduler, optimizer: ZeroRedundancyOptimizer, c
 
     trainer = Engine(process_function)
 
+    to_save = {
+        'model': model,
+        'optimizer': optimizer,
+        'scheduler': scheduler,
+        'trainer': trainer,
+        'noise_scheduler': noise_scheduler,
+        'scaler': scaler
+    }
     ema_model = None
     if rank == 0:
-        ema_handler = EMAHandler(model, momentum=0.0001)
+        ema_handler = EMAHandler(model, momentum=cfg.ema_momentum)
         ema_model = ema_handler.ema_model
         ema_handler.attach(trainer, name="ema_momentum",
                            event=Events.ITERATION_COMPLETED)
+        to_save['ema_model'] = ema_model
 
-        to_save = {
-            'model': model,
-            'ema_model': ema_model,
-            'optimizer': optimizer,
-            'scheduler': scheduler,
-            'trainer': trainer,
-            'noise_scheduler': noise_scheduler,
-            'scaler': scaler
-        }
-    else:
-        to_save = {
-            'model': model,
-            'optimizer': optimizer,
-            'scheduler': scheduler,
-            'trainer': trainer,
-            'noise_scheduler': noise_scheduler,
-            'scaler': scaler
-        }
-
-    @trainer.on(Events.ITERATION_COMPLETED(every=eval_interval))
+    @trainer.on(Events.ITERATION_COMPLETED(every=10000))
     def consolidate_state_dict():
         optimizer.consolidate_state_dict()
         idist.barrier()
@@ -148,11 +168,11 @@ def create_trainer(model, noise_scheduler, optimizer: ZeroRedundancyOptimizer, c
         trainer,
         train_sampler=train_sampler,
         to_save=to_save if rank == 0 else None,
-        save_every_iters=eval_interval,
-        output_path=save_dir,
-        lr_scheduler=scheduler if not isinstance(
-            scheduler, optim.lr_scheduler.ReduceLROnPlateau) else None,
-        output_names=['loss'] + extra_monitor,
+        save_every_iters=10000,
+        output_path=cfg.save_dir,
+        lr_scheduler=scheduler if not is_reduce_on_plateau else None,
+        output_names=['loss'] +
+        OmegaConf.to_container(cfg.extra_monitor_metrics),
         with_pbars=True if rank == 0 else False,
         with_pbar_on_iters=True,
         n_saved=2,
@@ -160,7 +180,7 @@ def create_trainer(model, noise_scheduler, optimizer: ZeroRedundancyOptimizer, c
         clear_cuda_cache=False
     )
 
-    if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+    if is_reduce_on_plateau:
         trainer.add_event_handler(
             Events.ITERATION_COMPLETED, lambda engine: scheduler.step(
                 engine.state.metrics['loss'])
@@ -176,32 +196,49 @@ def create_trainer(model, noise_scheduler, optimizer: ZeroRedundancyOptimizer, c
     return trainer, ema_model
 
 
-def training(local_rank, config: dict):
+def get_dataflow(cfg: DictConfig):
+    train_data = hydra.utils.instantiate(cfg.dataset)
+    train_loader = idist.auto_dataloader(train_data, **cfg.loader)
+    return train_loader
+
+
+def initialize(cfg: DictConfig):
+    model = hydra.utils.instantiate(cfg.model)
+    model = idist.auto_model(model)
+    noise_scheduler = NoiseScheduler()
+    noise_scheduler = idist.auto_model(noise_scheduler)
+
+    parameters = ContiguousParams(
+        chain(model.parameters(), noise_scheduler.parameters()))
+
+    optim_kwargs: dict = OmegaConf.to_container(cfg.optimizer)
+    *module_path, class_name = optim_kwargs.pop('_target_').split('.')
+    m = importlib.import_module('.'.join(module_path))
+    optim_type = getattr(m, class_name)
+    optimizer = ZeroRedundancyOptimizer(
+        parameters.contiguous(), optim_type, parameters_as_bucket_view=False, **optim_kwargs)
+    # optimizer = idist.auto_optim(optimizer)
+
+    scheduler = hydra.utils.instantiate(cfg.scheduler, optimizer=optimizer)
+
+    return model, noise_scheduler, optimizer, scheduler
+
+
+def training(local_rank, cfg: DictConfig):
     rank = idist.get_rank()
     device = idist.device()
 
-    print(rank, ": run with config:", config, "- backend=", idist.backend())
+    print(rank, ": run with config:", cfg, "- backend=", idist.backend())
     print(f'world size = {idist.get_world_size()}')
 
-    model_name = config['name']
-    checkpoint_path = config['checkpoint']
-    trainer_config = config['trainer']
+    *_, model_name = cfg.model._target_.split('.')
+    checkpoint_path = cfg.checkpoint
 
-    log_dir = trainer_config['log_dir']
-    eval_dur = trainer_config['eval_dur']
-    sr = trainer_config['sr']
-    eval_interval = trainer_config['eval_interval']
-    eval_T = trainer_config['eval_T']
-    with_amp = trainer_config['with_amp']
+    train_loader = get_dataflow(cfg)
+    model, noise_scheduler, optimizer, scheduler = initialize(cfg)
 
-    train_loader = get_dataflow(config)
-    model, noise_scheduler, optimizer, scheduler = initialize(
-        config, device)
-
-    criterion = module_loss.diffusion_elbo
-
-    trainer, ema_model = create_trainer(model, noise_scheduler, optimizer, criterion,
-                                        scheduler, device, trainer_config, train_loader.sampler,
+    trainer, ema_model = create_trainer(model, noise_scheduler, optimizer,
+                                        scheduler, device, cfg, train_loader.sampler,
                                         checkpoint_path)
 
     if rank == 0:
@@ -210,33 +247,39 @@ def training(local_rank, config: dict):
         for test_input in train_loader:
             break
         # test_input = test_input[:1].to(device)
-        x, c = test_input
-        x = x[:1].to(device)
-        c = c[:1].to(device)
+        test_input_on_device = [t[:1].to(device) for t in test_input]
+        x, *c = test_input_on_device
         t = torch.tensor([0.], device=device)
         summary(ema_model,
-                input_data=(x, t, c),
+                input_data=[x, t] + c,
                 device=device,
                 col_names=("input_size", "output_size", "num_params", "kernel_size",
                            "mult_adds"),
                 col_width=16,
                 row_settings=("depth", "var_names"))
 
-        tb_logger = get_logger(trainer, model, noise_scheduler, optimizer,
-                               log_dir, model_name, eval_interval)
+        tb_logger = get_logger(
+            trainer, model, noise_scheduler, optimizer, cfg.log_dir, model_name)
 
         @torch.no_grad()
         def generate_samples(engine):
-            z_1 = torch.randn(1, sr * eval_dur, device=device)
-            steps = torch.linspace(0, 1, eval_T + 1, device=device)
+            z_1 = torch.randn(1, cfg.sr * cfg.eval_dur, device=device)
+            steps = torch.linspace(0, 1, cfg.eval_T + 1, device=device)
             gamma, steps = noise_scheduler(steps)
 
+            if cfg.speaker_emb_path:
+                speaker_emb = torch.load(cfg.speaker_emb_path)
+                speaker_emb = speaker_emb.to(device).requires_grad_(False)
+                c = [speaker_emb.unsqueeze(0)]
+            else:
+                c = []
+
             z_0 = reverse_process_new(z_1, gamma,
-                                      steps, ema_model, with_amp=with_amp)
+                                      steps, ema_model, *c, with_amp=cfg.with_amp)
 
             generated = z_0.squeeze().clip(-0.99, 0.99)
             tb_logger.writer.add_audio(
-                'generated', generated, engine.state.iteration, sample_rate=sr)
+                'generated', generated, engine.state.iteration, sample_rate=cfg.sr)
 
         @torch.no_grad()
         def plot_noise_curve(engine):
@@ -248,36 +291,25 @@ def training(local_rank, config: dict):
             tb_logger.writer.add_figure(
                 'log_snr', figure, engine.state.iteration)
 
-        # trainer.add_event_handler(Events.ITERATION_COMPLETED(
-        #     every=eval_interval), generate_samples)
-        trainer.add_event_handler(Events.ITERATION_COMPLETED(
-            every=eval_interval), plot_noise_curve)
+        trainer.add_event_handler(Events.EPOCH_COMPLETED, generate_samples)
+        trainer.add_event_handler(Events.EPOCH_COMPLETED, plot_noise_curve)
 
-    e = trainer.run(train_loader, max_epochs=1)
+    e = trainer.run(train_loader, max_epochs=cfg.epochs)
 
     if rank == 0:
         tb_logger.close()
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description='Unconditional DiffWave Fixed-Noise Training')
-    parser.add_argument('config', type=str, help='config file')
-    parser.add_argument('--checkpoint', type=str, default=None,
-                        help='training checkpoint')
-
-    args = parser.parse_args()
-
-    config = json.load(open(args.config))
-    # validate(config, schema=CONFIG_SCHEMA)
-
-    args_dict = vars(args)
-    config.update(args_dict)
-
+@hydra.main(config_path="conf", config_name="config")
+def run(cfg: DictConfig):
     backend = 'nccl'
     dist_configs = {
         'nproc_per_node': torch.cuda.device_count()
     }
 
     with idist.Parallel(backend=backend, **dist_configs) as parallel:
-        parallel.run(training, config)
+        parallel.run(training, cfg)
+
+
+if __name__ == "__main__":
+    run()
