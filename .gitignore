@@ -3,3 +3,6 @@
 *.pt
 *.pth
 generated/*
+outputs/*
+test_folder/*
+.ipynb_checkpoints/*
