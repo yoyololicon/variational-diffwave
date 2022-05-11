@@ -13,10 +13,10 @@
 # limitations under the License.
 # ==============================================================================
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 
 from math import sqrt
 
@@ -30,6 +30,11 @@ def silu(x):
 def gru(x: torch.Tensor):
     a, b = x.chunk(2, 1)
     return a.tanh() * b.sigmoid()
+
+
+@torch.jit.script
+def glu(a, b):
+    return a * b.sigmoid()
 
 
 class DiffusionEmbedding(nn.Module):
@@ -112,13 +117,14 @@ class ResidualBlock(nn.Module):
         return (x + residual[0]) / sqrt(2.0) if len(residual) else None, skip
 
 
-class DiffWave(nn.Module):
+class SpeakerDiffWave(nn.Module):
     def __init__(self,
                  res_channels: int = 64,
-                 T: int = 50,
-                 n_mels: int = 80,
-                 layers: int = 30,
-                 cycle_length: int = 10
+                 T: int = 1,
+                 n_emb: int = 256,
+                 layers: int = 40,
+                 cycle_length: int = 8,
+                 dilation_base: int = 3
                  ):
         super().__init__()
 
@@ -127,9 +133,9 @@ class DiffWave(nn.Module):
             nn.ReLU(inplace=True)
         )
         self.diffusion_embedding = DiffusionEmbedding(T)
-        self.spectrogram_upsampler = SpectrogramUpsampler()
 
-        dilations = [2 ** (i % cycle_length) for i in range(layers)]
+        dilations = [dilation_base ** (i % cycle_length)
+                     for i in range(layers)]
         self.residual_layers = nn.ModuleList([
             ResidualBlock(res_channels, d) for d in dilations
         ])
@@ -139,25 +145,20 @@ class DiffWave(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv1d(res_channels, 1, 1)
         )
-        # nn.init.zeros_(self.output_projection[2].weight)
-        # nn.init.zeros_(self.output_projection[2].bias)
 
-        self.conditioner = nn.Conv1d(
-            n_mels, res_channels * 2 * layers, 1, bias=False)
+        self.conditioner = nn.Linear(
+            n_emb, res_channels * 2 * layers, bias=False)
 
-    def forward(self, audio, diffusion_step, spectrogram):
+    def forward(self, audio, diffusion_step, speaker_emb):
         x = audio.unsqueeze(1)
         x = self.input_projection(x)
 
         diffusion_step = self.diffusion_embedding(diffusion_step)
-        spectrogram = self.spectrogram_upsampler(
-            spectrogram)[..., :x.shape[-1]]
-
-        condition = self.conditioner(spectrogram).chunk(
+        condition = self.conditioner(speaker_emb).chunk(
             len(self.residual_layers), 1)
         skip = 0
         for layer, c in zip(self.residual_layers, condition):
-            x, skip_connection = layer(x, diffusion_step, c)
+            x, skip_connection = layer(x, diffusion_step, c.unsqueeze(2))
             skip += skip_connection
 
         x = skip / sqrt(len(self.residual_layers))
@@ -168,9 +169,10 @@ class DiffWave(nn.Module):
 class UnconditionalDiffWave(nn.Module):
     def __init__(self,
                  res_channels: int = 64,
-                 T: int = 50,
+                 T: int = 1000,
                  layers: int = 30,
-                 cycle_length: int = 10
+                 cycle_length: int = 10,
+                 dilation_base: int = 2
                  ):
         super().__init__()
 
@@ -180,7 +182,8 @@ class UnconditionalDiffWave(nn.Module):
         )
         self.diffusion_embedding = DiffusionEmbedding(T)
 
-        dilations = [2 ** (i % cycle_length) for i in range(layers)]
+        dilations = [dilation_base ** (i % cycle_length)
+                     for i in range(layers)]
         self.residual_layers = nn.ModuleList([
             ResidualBlock(res_channels, d) for d in dilations
         ])
