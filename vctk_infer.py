@@ -3,6 +3,7 @@ from copy import deepcopy
 import os
 from pathlib import Path
 import hydra
+import numpy as np
 from omegaconf import OmegaConf
 import torchaudio
 import torch
@@ -86,29 +87,6 @@ class LSD(nn.Module):
 
 
 @torch.no_grad()
-def nuwave_reverse(y_hat, gamma, inference_func: Callable, verbose=True):
-    log_alpha, log_var = gamma2logas(gamma)
-    var = log_var.exp()
-    alpha_st = torch.exp(log_alpha[:-1] - log_alpha[1:])
-    c = -torch.expm1(gamma[:-1] - gamma[1:])
-    c.relu_()
-    T = gamma.numel() - 1
-
-    z_t = torch.randn_like(y_hat)
-
-    for t in tqdm(range(T, 0, -1), disable=not verbose):
-        s = t - 1
-        noise_hat = inference_func(z_t, y_hat, t)
-        mu = (z_t - var[t].sqrt() * c[s] * noise_hat) * alpha_st[s]
-
-        z_t = mu
-        if s:
-            z_t += (var[s] * c[s]).sqrt() * torch.randn_like(z_t)
-
-    return z_t
-
-
-@torch.no_grad()
 def reverse(y_hat,
             gamma,
             donwample: Callable,
@@ -148,9 +126,34 @@ def reverse(y_hat,
     return z_t
 
 
-def foo(fq: Queue, rq: Queue, q: int,
+@torch.no_grad()
+def nuwave_reverse(y_hat, gamma, inference_model: Callable, verbose=True):
+    log_alpha, log_var = gamma2logas(gamma)
+    var = log_var.exp()
+    alpha = log_alpha.exp()
+    alpha_st = torch.exp(log_alpha[:-1] - log_alpha[1:])
+    c = -torch.expm1(gamma[:-1] - gamma[1:])
+    c.relu_()
+    T = gamma.numel() - 1
+
+    z_t = torch.randn_like(y_hat)
+
+    for t in tqdm(range(T, 0, -1), disable=not verbose):
+        s = t - 1
+        noise_hat = inference_model(z_t, y_hat, alpha[t:t+1])
+        mu = (z_t - var[t].sqrt() * c[s] * noise_hat) * alpha_st[s]
+
+        z_t = mu
+        if s:
+            z_t += (var[s] * c[s]).sqrt() * torch.randn_like(z_t)
+
+    return z_t
+
+
+def foo(fq: Queue, rq: Queue, q: int, infer_type: str,
         model, evaluater, downsampler, upsampler, gamma, steps):
     try:
+        alpha = gamma2as(gamma)[0]
         while not fq.empty():
             filename = fq.get()
             device = gamma.device
@@ -166,16 +169,39 @@ def foo(fq: Queue, rq: Queue, q: int,
             else:
                 y = raw_y
 
-            y_hat = upsampler(downsampler(y))
+            y_lowpass = downsampler(y)
 
-            y_recon = reverse(
-                y_hat, gamma,
-                amp.autocast()(downsampler),
-                amp.autocast()(upsampler),
-                amp.autocast()(lambda x, t: model(
-                    x, steps[t:t+1], speaker_emb)),
-                verbose=False
-            )
+            if infer_type == "nuwave":
+                y_hat = F.upsample(y_lowpass.unsqueeze(
+                    1), scale_factor=q, mode='linear', align_corners=False).squeeze(1)
+                y_recon = nuwave_reverse(y_hat, gamma,
+                                         amp.autocast()(model),
+                                         verbose=False)
+            elif infer_type == "inpainting":
+                y_hat = upsampler(y_lowpass)
+                y_recon = reverse(
+                    y_hat, gamma,
+                    amp.autocast()(downsampler),
+                    amp.autocast()(upsampler),
+                    amp.autocast()(lambda x, t: model(
+                        x, steps[t:t+1], speaker_emb)),
+                    verbose=False
+                )
+            elif infer_type == "nuwave-inpainting":
+                y_hat = upsampler(y_lowpass)
+                nuwave_cond = F.upsample(y_lowpass.unsqueeze(
+                    1), scale_factor=q, mode='linear', align_corners=False).squeeze(1)
+                y_recon = reverse(
+                    y_hat, gamma,
+                    amp.autocast()(downsampler),
+                    amp.autocast()(upsampler),
+                    amp.autocast()(lambda x, t: model(
+                        x, nuwave_cond, alpha[t:t+1])),
+                    verbose=False
+                )
+            else:
+                raise ValueError(
+                    "infer_type must be one of nuwave, inpainting, nuwave-inpainting")
 
             if offset:
                 y_recon = torch.cat(
@@ -193,10 +219,11 @@ if __name__ == '__main__':
     parser.add_argument('ckpt', type=str)
     parser.add_argument('cfg', type=str)
     parser.add_argument('vctk', type=str)
+    parser.add_argument('--log-snr', type=str)
     parser.add_argument('--nuwave-ckpt', type=str)
     parser.add_argument('--out_dir', type=str)
     parser.add_argument('--rate', type=int, default=2)
-    parser.add_argument('--T', type=int, default=50)
+    parser.add_argument('-T', type=int, default=50)
     parser.add_argument('--infer-type', type=str,
                         choices=['inpainting', 'nuwave', 'nuwave-inpainting'], default='inpainting')
     parser.add_argument('--downsample-type', type=str,
@@ -208,19 +235,42 @@ if __name__ == '__main__':
 
     gpus = torch.cuda.device_count()
 
-    cfg = OmegaConf.load(args.cfg)
-    model = hydra.utils.instantiate(cfg.model)
     checkpoint = torch.load(args.ckpt, map_location=torch.device('cpu'))
-    model.load_state_dict(checkpoint['ema_model'])
+    cfg = OmegaConf.load(args.cfg)
+    if 'nuwave' in args.infer_type:
+        model = module_arch.NuWave()
+        state_dict = torch.load(
+            args.nuwave_ckpt, map_location=torch.device('cpu'))
+        state_dict = dict((x[6:], y)
+                          for x, y in state_dict.items() if x.startswith('model.'))
+        model.load_state_dict(state_dict)
+    else:
+        model = hydra.utils.instantiate(cfg.model)
+        model.load_state_dict(checkpoint['ema_model'])
     model.eval()
 
-    scheduler = module_arch.NoiseScheduler()
+    if cfg.train_T > 0:
+        scheduler = module_arch.NoiseScheduler()
+    else:
+        scheduler = module_arch.LogSNRLinearScheduler()
     scheduler.load_state_dict(checkpoint['noise_scheduler'])
     scheduler.eval()
     scheduler = scheduler.cuda()
-    t = torch.linspace(0, 1, args.T + 1).cuda()
-    with torch.no_grad():
-        gamma, steps = scheduler(t)
+
+    if args.log_snr:
+        gamma0, gamma1 = scheduler.gamma0.detach().cpu(
+        ).numpy(), scheduler.gamma1.detach().cpu().numpy()
+        log_snr = np.loadtxt(args.log_snr)
+        xp = np.arange(len(log_snr))
+        x = np.linspace(xp[0], xp[-1], args.T + 1)
+        gamma = -np.interp(x, xp, log_snr)
+        steps = (gamma - gamma0) / (gamma1 - gamma0)
+        gamma, steps = torch.tensor(gamma, dtype=torch.float32), torch.tensor(
+            steps, dtype=torch.float32)
+    else:
+        t = torch.linspace(0, 1, args.T + 1).cuda()
+        with torch.no_grad():
+            gamma, steps = scheduler(t)
 
     sinc_kwargs = {
         'q': args.rate,
@@ -244,9 +294,9 @@ if __name__ == '__main__':
         upsampler = Upsample(**sinc_kwargs)
 
         p = Process(target=foo, args=(
-            file_q, result_q, args.rate, deepcopy(model).to(device), evaluater.to(device), downsampler.to(
+            file_q, result_q, args.rate, args.infer_type,
+            deepcopy(model).to(device), evaluater.to(device), downsampler.to(
                 device), upsampler.to(device), gamma.to(device), steps.to(device)))
-        p.daemon = True
         processes.append(p)
 
     vctk_path = Path(args.vctk)
@@ -269,6 +319,7 @@ if __name__ == '__main__':
         while n < len(test_files):
             filename, lsd = result_q.get()
             if isinstance(lsd, Exception):
+                print(lsd)
                 break
             pbar.set_postfix(lsd=lsd)
             pbar.update(1)
