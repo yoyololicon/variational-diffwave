@@ -6,8 +6,6 @@ from torch.cuda import amp
 from torch.distributed.optim import ZeroRedundancyOptimizer
 from torchinfo import summary
 import matplotlib.pyplot as plt
-import os
-from datetime import datetime
 from random import uniform
 from ignite.engine import Engine, Events
 from ignite.handlers import Checkpoint, EMAHandler
@@ -19,6 +17,7 @@ from omegaconf import DictConfig, OmegaConf
 from hydra.core.hydra_config import HydraConfig
 from itertools import chain
 from contiguous_params import ContiguousParams
+from models.noise_schedule import LogSNRLinearScheduler
 
 from utils.utils import gamma2logas, get_instance, gamma2snr, snr2as, gamma2as
 from loss import diffusion_elbo
@@ -76,12 +75,13 @@ def create_trainer(model: nn.Module,
         noise_scheduler.train()
         optimizer.zero_grad()
 
+        if isinstance(batch, torch.Tensor):
+            batch = (batch,)
         batch_on_device = [b.to(device) for b in batch]
         x, *c = batch_on_device
         noise = torch.randn_like(x)
 
         N = x.shape[0]
-        handle = None
         if cfg.train_T > 0:
             T = cfg.train_T
             s = torch.remainder(
@@ -111,32 +111,21 @@ def create_trainer(model: nn.Module,
 
             with amp.autocast(enabled=cfg.with_amp):
                 gamma_t, gamma_hat = noise_scheduler(t)
-                gamma_hat.retain_grad()
 
-                log_alpha_t, log_var_t = gamma2logas(gamma_t)
-                alpha_t, std_t = torch.exp(
-                    log_alpha_t), torch.exp(log_var_t * 0.5)
-                z_t = alpha_t[:, None] * x + std_t[:, None] * noise
+                alpha_t, var_t = gamma2as(gamma_t)
+                z_t = alpha_t[:, None] * x + var_t.sqrt()[:, None] * noise
 
                 noise_hat = model(z_t, gamma_hat, *c)
-
-                d_gamma_t, *_ = grad(gamma_t.sum(), t, create_graph=True)
                 loss, extra_dict = diffusion_elbo(
                     base_noise_scheduler.gamma0,
                     base_noise_scheduler.gamma1,
-                    d_gamma_t,
+                    base_noise_scheduler.gamma1 - base_noise_scheduler.gamma0,
                     x, noise, noise_hat)
-
-                loss_T_raw = extra_dict['loss_T_raw']
-                handle = gamma_hat.register_hook(
-                    lambda grad: 2 * grad * loss_T_raw.to(grad.dtype))
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
 
-        if handle is not None:
-            handle.remove()
         result = {'loss': loss.item()}
         result.update(extra_dict)
         return result
@@ -205,7 +194,11 @@ def get_dataflow(cfg: DictConfig):
 def initialize(cfg: DictConfig):
     model = hydra.utils.instantiate(cfg.model)
     model = idist.auto_model(model)
-    noise_scheduler = NoiseScheduler()
+
+    if cfg.train_T > 0:
+        noise_scheduler = NoiseScheduler()
+    else:
+        noise_scheduler = LogSNRLinearScheduler()
     noise_scheduler = idist.auto_model(noise_scheduler)
 
     parameters = ContiguousParams(
@@ -246,11 +239,13 @@ def training(local_rank, cfg: DictConfig):
         # use torchinfo
         for test_input in train_loader:
             break
+        if isinstance(test_input, torch.Tensor):
+            test_input = (test_input,)
         # test_input = test_input[:1].to(device)
         test_input_on_device = [t[:1].to(device) for t in test_input]
         x, *c = test_input_on_device
         t = torch.tensor([0.], device=device)
-        summary(ema_model,
+        summary(model.module,
                 input_data=[x, t] + c,
                 device=device,
                 col_names=("input_size", "output_size", "num_params", "kernel_size",
