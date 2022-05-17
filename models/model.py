@@ -194,7 +194,7 @@ class UnconditionalDiffWave(nn.Module):
             nn.Conv1d(res_channels, 1, 1)
         )
 
-    def forward(self, audio, diffusion_step):
+    def forward(self, audio, diffusion_step, _=None):
         x = audio.unsqueeze(1)
         x = self.input_projection(x)
         diffusion_step = self.diffusion_embedding(diffusion_step)
