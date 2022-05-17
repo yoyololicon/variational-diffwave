@@ -40,6 +40,19 @@ class NoiseScheduler(nn.Module):
         return gamma, normalized_gamma_hat
 
 
+class LogSNRLinearScheduler(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.gamma1 = nn.Parameter(torch.ones(1) * 0, requires_grad=True)
+        self.gamma0 = nn.Parameter(torch.ones(1) * -10, requires_grad=True)
+
+    def forward(self, t: torch.Tensor):
+        t = t.clamp(0, 1)
+        gamma = self.gamma0 * (1 - t) + self.gamma1 * t
+        return gamma, t
+
+
 class CosineScheduler(nn.Module):
     def __init__(self, gamma0: float = -23, gamma1: float = 3.6):
         super().__init__()
