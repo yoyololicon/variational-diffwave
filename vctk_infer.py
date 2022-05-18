@@ -100,7 +100,7 @@ def reverse(y_hat,
     var_st = torch.exp(log_var[:-1] - log_var[1:])
     c = -torch.expm1(gamma[:-1] - gamma[1:])
     c.relu_()
-    T = gamma.numel() - 1
+    T = gamma.numel()
 
     def degradation_func(x): return upsample(donwample(x))
 
@@ -109,21 +109,21 @@ def reverse(y_hat,
     z_t = y_hat * alpha[-1] + lowpass_noise * \
         var[-1].sqrt() + (noise - lowpass_noise)
 
-    for t in tqdm(range(T, 0, -1), disable=not verbose):
+    for t in tqdm(range(T - 1, 0, -1), disable=not verbose):
         s = t - 1
         noise_hat = inference_func(z_t, t)
         mu = (z_t - var[t].sqrt() * c[s] * noise_hat) * alpha_st[s]
 
-        if s:
-            mu = mu - degradation_func(mu)
-            mu += degradation_func(z_t) * \
-                var_st[s] / alpha_st[s] + alpha[s] * c[s] * y_hat
+        mu = mu - degradation_func(mu)
+        mu += degradation_func(z_t) * \
+            var_st[s] / alpha_st[s] + alpha[s] * c[s] * y_hat
 
         z_t = mu
-        if s:
-            z_t += (var[s] * c[s]).sqrt() * torch.randn_like(z_t)
+        z_t += (var[s] * c[s]).sqrt() * torch.randn_like(z_t)
 
-    return z_t
+    noise_hat = inference_func(z_t, 0)
+    final = (z_t - var[0].sqrt() * noise_hat) / alpha[0]
+    return final
 
 
 @torch.no_grad()
@@ -134,20 +134,21 @@ def nuwave_reverse(y_hat, gamma, inference_model: Callable, verbose=True):
     alpha_st = torch.exp(log_alpha[:-1] - log_alpha[1:])
     c = -torch.expm1(gamma[:-1] - gamma[1:])
     c.relu_()
-    T = gamma.numel() - 1
+    T = gamma.numel()
 
     z_t = torch.randn_like(y_hat)
 
-    for t in tqdm(range(T, 0, -1), disable=not verbose):
+    for t in tqdm(range(T - 1, 0, -1), disable=not verbose):
         s = t - 1
         noise_hat = inference_model(z_t, y_hat, alpha[t:t+1])
         mu = (z_t - var[t].sqrt() * c[s] * noise_hat) * alpha_st[s]
 
         z_t = mu
-        if s:
-            z_t += (var[s] * c[s]).sqrt() * torch.randn_like(z_t)
+        z_t += (var[s] * c[s]).sqrt() * torch.randn_like(z_t)
 
-    return z_t
+    noise_hat = inference_model(z_t, y_hat, alpha[:1])
+    final = (z_t - var[0].sqrt() * noise_hat) / alpha[0]
+    return final
 
 
 def foo(fq: Queue, rq: Queue, q: int, infer_type: str,
@@ -262,7 +263,7 @@ if __name__ == '__main__':
         ).numpy(), scheduler.gamma1.detach().cpu().numpy()
         log_snr = np.loadtxt(args.log_snr)
         xp = np.arange(len(log_snr))
-        x = np.linspace(xp[0], xp[-1], args.T + 1)
+        x = np.linspace(xp[0], xp[-1], args.T)
         gamma = -np.interp(x, xp, log_snr)
         steps = (gamma - gamma0) / (gamma1 - gamma0)
         gamma, steps = torch.tensor(gamma, dtype=torch.float32), torch.tensor(
@@ -319,7 +320,7 @@ if __name__ == '__main__':
         while n < len(test_files):
             filename, lsd = result_q.get()
             if isinstance(lsd, Exception):
-                print(lsd)
+                print(f'catch exception: {lsd}')
                 break
             pbar.set_postfix(lsd=lsd)
             pbar.update(1)
