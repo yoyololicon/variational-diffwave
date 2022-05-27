@@ -104,10 +104,9 @@ def reverse(y_hat,
 
     def degradation_func(x): return upsample(donwample(x))
 
-    noise = torch.randn_like(y_hat)
-    lowpass_noise = degradation_func(noise)
-    z_t = y_hat * alpha[-1] + lowpass_noise * \
-        var[-1].sqrt() + (noise - lowpass_noise)
+    z_t = torch.randn_like(y_hat)
+    # lowpass_noise = degradation_func(noise)
+    # z_t = (y_hat - lowpass_noise) * alpha[-1] + noise
 
     for t in tqdm(range(T - 1, 0, -1), disable=not verbose):
         s = t - 1
