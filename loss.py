@@ -20,8 +20,9 @@ def diffusion_elbo(gamma_0, gamma_1, d_gamma_t,
 
     # recon loss E[-log p(x | z_0)]
     # diff = (1 - alpha_0) * x
-    l2 = x_dot * torch.expm1(log_alpha_0) ** 2
-    ll = -0.5 * (log_var_0 + l2 / log_var_0.exp() + math.log(2 * math.pi))
+    # l2 = x_dot * torch.expm1(log_alpha_0) ** 2
+    # ll = -0.5 * (log_var_0 + l2 / log_var_0.exp() + math.log(2 * math.pi))
+    ll = -0.5 * (gamma_0 + 1 + math.log(2 * math.pi))
     recon_loss = -ll
 
     extra_dict = {
