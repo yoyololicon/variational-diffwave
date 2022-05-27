@@ -17,12 +17,11 @@ from omegaconf import DictConfig, OmegaConf
 from hydra.core.hydra_config import HydraConfig
 from itertools import chain
 from contiguous_params import ContiguousParams
-from models.noise_schedule import LogSNRLinearScheduler
 
 from utils.utils import gamma2logas, get_instance, gamma2snr, snr2as, gamma2as
 from loss import diffusion_elbo
 from inference import reverse_process_new
-from models import NoiseScheduler
+from models import NoiseScheduler, LogSNRLinearScheduler
 import datasets
 
 
@@ -107,7 +106,6 @@ def create_trainer(model: nn.Module,
         else:
             t = torch.remainder(
                 uniform(0, 1) + torch.arange(N, device=device) / N, 1.)
-            t = t.clone().detach().requires_grad_(True)
 
             with amp.autocast(enabled=cfg.with_amp):
                 gamma_t, gamma_hat = noise_scheduler(t)
@@ -259,7 +257,7 @@ def training(local_rank, cfg: DictConfig):
         @torch.no_grad()
         def generate_samples(engine):
             z_1 = torch.randn(1, cfg.sr * cfg.eval_dur, device=device)
-            steps = torch.linspace(0, 1, cfg.eval_T + 1, device=device)
+            steps = torch.linspace(0, 1, cfg.eval_T, device=device)
             gamma, steps = noise_scheduler(steps)
 
             if cfg.speaker_emb_path:
