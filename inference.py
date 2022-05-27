@@ -12,19 +12,22 @@ def reverse_process_new(z_1, gamma, steps, model, *condition, with_amp=False):
     c = -torch.expm1(gamma[:-1] - gamma[1:])
     c.relu_()
 
-    T = gamma.numel() - 1
+    T = gamma.numel()
     z_t = z_1
-    for t in tqdm(range(T, 0, -1)):
+    for t in tqdm(range(T - 1, 0, -1)):
         s = t - 1
         with amp.autocast(enabled=with_amp):
             noise_hat = model(z_t, steps[t:t+1], *condition)
         noise_hat = noise_hat.float()
         mu = (z_t - var[t].sqrt() * c[s] * noise_hat) * alpha_st[s]
         z_t = mu
-        if s:
-            z_t += (var[s] * c[s]).sqrt() * torch.randn_like(z_t)
+        z_t += (var[s] * c[s]).sqrt() * torch.randn_like(z_t)
 
-    return z_t
+    with amp.autocast(enabled=with_amp):
+        noise_hat = model(z_t, steps[:1], *condition)
+    noise_hat = noise_hat.float()
+    final = (z_t - var[0].sqrt() * noise_hat) / log_alpha[0].exp()
+    return final
 
 
 def reverse_process_ddim(z_1, gamma, steps, model, with_amp=False):
