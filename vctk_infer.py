@@ -38,7 +38,6 @@ class LowPass(nn.Module):
         self.register_buffer('filters', f, False)
 
     # x: [B,T], r: [B], int
-    @torch.no_grad()
     def forward(self, x, r):
         origin_shape = x.shape
         T = origin_shape[-1]
@@ -56,7 +55,7 @@ class LowPass(nn.Module):
                         self.hop,
                         window=self.window,
                         )  # return_complex=False)
-        x = x[:, :T].detach()
+        x = x[:, :T]
         return x.view(*origin_shape)
 
 
@@ -105,12 +104,17 @@ def reverse(y_hat,
     def degradation_func(x): return upsample(donwample(x))
 
     z_t = torch.randn_like(y_hat)
-    # lowpass_noise = degradation_func(noise)
-    # z_t = (y_hat - lowpass_noise) * alpha[-1] + noise
 
     for t in tqdm(range(T - 1, 0, -1), disable=not verbose):
         s = t - 1
         noise_hat = inference_func(z_t, t)
+
+        # clip noise
+        # noise_hat = noise_hat.clamp_(
+        #    (z_t - alpha[t]) * var[t].rsqrt(),
+        #    (alpha[t] + z_t) * var[t].rsqrt(),
+        # )
+
         mu = (z_t - var[t].sqrt() * c[s] * noise_hat) * alpha_st[s]
 
         mu = mu - degradation_func(mu)
@@ -146,6 +150,69 @@ def nuwave_reverse(y_hat, gamma, inference_model: Callable, verbose=True):
         z_t += (var[s] * c[s]).sqrt() * torch.randn_like(z_t)
 
     noise_hat = inference_model(z_t, y_hat, alpha[:1])
+    final = (z_t - var[0].sqrt() * noise_hat) / alpha[0]
+    return final
+
+
+def reverse_manifold(y_hat,
+                     gamma,
+                     donwample: Callable,
+                     upsample: Callable,
+                     inference_func: Callable,
+                     verbose=True):
+    log_alpha, log_var = gamma2logas(gamma)
+    var = log_var.exp()
+    alpha = log_alpha.exp()
+    alpha_st = torch.exp(log_alpha[:-1] - log_alpha[1:])
+    var_st = torch.exp(log_var[:-1] - log_var[1:])
+    c = -torch.expm1(gamma[:-1] - gamma[1:])
+    c.relu_()
+    T = gamma.numel()
+
+    def degradation_func(x): return upsample(donwample(x))
+
+    z_t = torch.randn_like(y_hat)
+
+    window_size = 144000
+    overlap = 12000
+    hop_size = window_size - overlap
+
+    for t in tqdm(range(T - 1, 0, -1), disable=not verbose):
+        s = t - 1
+        noise_hat = torch.zeros_like(z_t)
+        correction_grad = torch.zeros_like(z_t)
+        p = torch.linspace(0, 1, overlap, device=z_t.device)
+        for i in range(0, z_t.shape[1] - overlap, hop_size):
+            sub_z_t = z_t[:, i:i+window_size].clone().requires_grad_(True)
+            sub_noise_hat = inference_func(sub_z_t, t)
+            x_hat = (sub_z_t - var[t].sqrt() * sub_noise_hat) / alpha[t]
+            x_hat.clamp_(-1, 1)
+            loss = F.mse_loss(degradation_func(x_hat),
+                              y_hat[:, i:i+window_size], reduction='sum')
+            loss.backward()
+            g = sub_z_t.grad.clone()
+            sub_noise_hat = sub_noise_hat.detach()
+            if i > 0:
+                noise_hat[:, i:i+overlap] *= 1 - p
+                correction_grad[:, i:i+overlap] *= 1 - p
+                sub_noise_hat[:, :overlap] *= p
+                g[:, :overlap] *= p
+
+            noise_hat[:, i:i+window_size] += sub_noise_hat
+            correction_grad[:, i:i+window_size] += g
+
+        correction_vec = correction_grad - degradation_func(correction_grad)
+
+        mu = (z_t - var[t].sqrt() * c[s] * noise_hat) * alpha_st[s]
+        mu = mu - degradation_func(mu) - correction_vec
+        mu += degradation_func(z_t) * \
+            var_st[s] / alpha_st[s] + alpha[s] * c[s] * y_hat
+
+        z_t = mu
+        z_t += (var[s] * c[s]).sqrt() * torch.randn_like(z_t)
+
+    with torch.no_grad():
+        noise_hat = inference_func(z_t, 0)
     final = (z_t - var[0].sqrt() * noise_hat) / alpha[0]
     return final
 
@@ -199,6 +266,16 @@ def foo(fq: Queue, rq: Queue, q: int, infer_type: str,
                         x, nuwave_cond, alpha[t:t+1])),
                     verbose=False
                 )
+            elif infer_type == "manifold":
+                y_hat = upsampler(y_lowpass)
+                y_recon = reverse_manifold(
+                    y_hat, gamma,
+                    amp.autocast()(downsampler),
+                    amp.autocast()(upsampler),
+                    amp.autocast()(lambda x, t: model(
+                        x, steps[t:t+1], speaker_emb)),
+                    verbose=False
+                )
             else:
                 raise ValueError(
                     "infer_type must be one of nuwave, inpainting, nuwave-inpainting")
@@ -225,7 +302,7 @@ if __name__ == '__main__':
     parser.add_argument('--rate', type=int, default=2)
     parser.add_argument('-T', type=int, default=50)
     parser.add_argument('--infer-type', type=str,
-                        choices=['inpainting', 'nuwave', 'nuwave-inpainting'], default='inpainting')
+                        choices=['inpainting', 'nuwave', 'nuwave-inpainting', 'manifold'], default='inpainting')
     parser.add_argument('--downsample-type', type=str,
                         choices=['sinc', 'stft'], default='stft')
 
@@ -332,39 +409,3 @@ if __name__ == '__main__':
             p.join()
 
     print(sum(lsd_list) / len(lsd_list))
-
-    # pbar = tqdm(test_files)
-    # for filename in pbar:
-    #     raw_y, sr = torchaudio.load(filename)
-    #     raw_y = raw_y.cuda()
-    #     speaker_emb = torch.load(str(filename).replace(".wav", "_emb.pt"))
-    #     speaker_emb = speaker_emb.cuda().view(1, -1)
-
-    #     offset = raw_y.shape[1] % args.rate
-    #     if offset:
-    #         y = raw_y[:, :-offset]
-    #     else:
-    #         y = raw_y
-
-    #     y_hat = upsampler(downsampler(y))
-
-    #     y_recon = reverse(
-    #         y_hat, gamma,
-    #         amp.autocast()(downsampler),
-    #         amp.autocast()(upsampler),
-    #         amp.autocast()(lambda x, t: model(x, steps[t:t+1], speaker_emb)),
-    #         verbose=False
-    #     )
-
-    #     if offset:
-    #         y_recon = torch.cat([y_recon, y_recon.new_zeros(1, offset)], dim=1)
-
-    #     lsd = evaluater(y_recon.squeeze(), raw_y.squeeze()).item()
-    #     pbar.set_postfix(lsd=lsd)
-
-    #     if args.out_dir:
-    #         sub_folders = str(filename.parent).replace(
-    #             str(vctk_path), '').split('/')
-    #         out_filename = PurePath(args.out_dir, *sub_folders, filename.name)
-    #         os.makedirs(out_filename.parent, exist_ok=True)
-    #         torchaudio.save(out_filename, y_recon.cpu(), sr)
