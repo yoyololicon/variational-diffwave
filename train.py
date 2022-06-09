@@ -81,6 +81,12 @@ def create_trainer(model: nn.Module,
         noise = torch.randn_like(x)
 
         N = x.shape[0]
+        # augmentation
+        db_scale = 10 ** (torch.empty(N, device=device).uniform_(-6, 6) / 20)
+        b_mask = torch.rand_like(db_scale) < 0.5
+        db_scale[b_mask] = -db_scale[b_mask]
+        x *= db_scale.unsqueeze(1)
+
         if cfg.train_T > 0:
             T = cfg.train_T
             s = torch.remainder(
@@ -243,7 +249,7 @@ def training(local_rank, cfg: DictConfig):
         test_input_on_device = [t[:1].to(device) for t in test_input]
         x, *c = test_input_on_device
         t = torch.tensor([0.], device=device)
-        summary(model.module,
+        summary(model.module if hasattr(model, 'module') else model,
                 input_data=[x, t] + c,
                 device=device,
                 col_names=("input_size", "output_size", "num_params", "kernel_size",
@@ -269,7 +275,6 @@ def training(local_rank, cfg: DictConfig):
 
             z_0 = reverse_process_new(z_1, gamma,
                                       steps, ema_model, *c, with_amp=cfg.with_amp)
-
             generated = z_0.squeeze().clip(-0.99, 0.99)
             tb_logger.writer.add_audio(
                 'generated', generated, engine.state.iteration, sample_rate=cfg.sr)
