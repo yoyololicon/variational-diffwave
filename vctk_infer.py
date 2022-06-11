@@ -88,7 +88,7 @@ class LSD(nn.Module):
 @torch.no_grad()
 def reverse(y_hat,
             gamma,
-            donwample: Callable,
+            downsample: Callable,
             upsample: Callable,
             inference_func: Callable,
             verbose=True):
@@ -101,7 +101,7 @@ def reverse(y_hat,
     c.relu_()
     T = gamma.numel()
 
-    def degradation_func(x): return upsample(donwample(x))
+    def degradation_func(x): return upsample(downsample(x))
 
     z_t = torch.randn_like(y_hat)
 
@@ -156,9 +156,10 @@ def nuwave_reverse(y_hat, gamma, inference_model: Callable, verbose=True):
 
 def reverse_manifold(y_hat,
                      gamma,
-                     donwample: Callable,
+                     downsample: Callable,
                      upsample: Callable,
                      inference_func: Callable,
+                     lr: float = 1,
                      verbose=True):
     log_alpha, log_var = gamma2logas(gamma)
     var = log_var.exp()
@@ -169,7 +170,7 @@ def reverse_manifold(y_hat,
     c.relu_()
     T = gamma.numel()
 
-    def degradation_func(x): return upsample(donwample(x))
+    def degradation_func(x): return upsample(downsample(x))
 
     z_t = torch.randn_like(y_hat)
 
@@ -201,10 +202,9 @@ def reverse_manifold(y_hat,
             noise_hat[:, i:i+window_size] += sub_noise_hat
             correction_grad[:, i:i+window_size] += g
 
-        correction_vec = correction_grad - degradation_func(correction_grad)
-
         mu = (z_t - var[t].sqrt() * c[s] * noise_hat) * alpha_st[s]
-        mu = mu - degradation_func(mu) - correction_vec
+        mu -= correction_grad * lr
+        mu = mu - degradation_func(mu)
         mu += degradation_func(z_t) * \
             var_st[s] / alpha_st[s] + alpha[s] * c[s] * y_hat
 
