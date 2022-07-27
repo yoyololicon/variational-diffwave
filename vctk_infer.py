@@ -1,5 +1,6 @@
 import argparse
 from copy import deepcopy
+import math
 import os
 from pathlib import Path
 import hydra
@@ -8,6 +9,7 @@ from omegaconf import OmegaConf
 import torchaudio
 import torch
 import torch.nn.functional as F
+from torch.autograd import grad
 from torch import Tensor, nn
 from torch.cuda import amp
 from tqdm import tqdm
@@ -177,21 +179,26 @@ def reverse_manifold(y_hat,
     window_size = 144000
     overlap = 12000
     hop_size = window_size - overlap
+    p = torch.linspace(0, 1, overlap, device=z_t.device)
 
     for t in tqdm(range(T - 1, 0, -1), disable=not verbose):
         s = t - 1
         noise_hat = torch.zeros_like(z_t)
         correction_grad = torch.zeros_like(z_t)
-        p = torch.linspace(0, 1, overlap, device=z_t.device)
+        # chunks = math.ceil((z_t.shape[1] - overlap) / hop_size)
+        # new_hop_size = (z_t.shape[1] - overlap) // chunks + 1
+        # if new_hop_size % 12:
+        #     new_hop_size += 12 - new_hop_size % 12
+        # new_window_size = new_hop_size + overlap
         for i in range(0, z_t.shape[1] - overlap, hop_size):
-            sub_z_t = z_t[:, i:i+window_size].clone().requires_grad_(True)
-            sub_noise_hat = inference_func(sub_z_t, t)
+            indexes = slice(i, i + window_size)
+            sub_z_t = z_t[:, indexes].clone().requires_grad_(True)
+            sub_noise_hat = inference_func(sub_z_t, t, indexes)
             x_hat = (sub_z_t - var[t].sqrt() * sub_noise_hat) / alpha[t]
             x_hat.clamp_(-1, 1)
             loss = F.mse_loss(degradation_func(x_hat),
-                              y_hat[:, i:i+window_size], reduction='sum')
-            loss.backward()
-            g = sub_z_t.grad.clone()
+                              y_hat[:, indexes], reduction='sum')
+            g, *_ = grad(loss, sub_z_t)
             sub_noise_hat = sub_noise_hat.detach()
             if i > 0:
                 noise_hat[:, i:i+overlap] *= 1 - p
@@ -199,8 +206,8 @@ def reverse_manifold(y_hat,
                 sub_noise_hat[:, :overlap] *= p
                 g[:, :overlap] *= p
 
-            noise_hat[:, i:i+window_size] += sub_noise_hat
-            correction_grad[:, i:i+window_size] += g
+            noise_hat[:, indexes] += sub_noise_hat
+            correction_grad[:, indexes] += g
 
         mu = (z_t - var[t].sqrt() * c[s] * noise_hat) * alpha_st[s]
         mu -= correction_grad * lr
@@ -212,12 +219,12 @@ def reverse_manifold(y_hat,
         z_t += (var[s] * c[s]).sqrt() * torch.randn_like(z_t)
 
     with torch.no_grad():
-        noise_hat = inference_func(z_t, 0)
+        noise_hat = inference_func(z_t, 0, slice(None))
     final = (z_t - var[0].sqrt() * noise_hat) / alpha[0]
     return final
 
 
-def foo(fq: Queue, rq: Queue, q: int, infer_type: str,
+def foo(fq: Queue, rq: Queue, q: int, infer_type: str, lr: float,
         model, evaluater, downsampler, upsampler, gamma, steps):
     try:
         alpha = gamma2as(gamma)[0]
@@ -227,8 +234,8 @@ def foo(fq: Queue, rq: Queue, q: int, infer_type: str,
 
             raw_y, sr = torchaudio.load(filename)
             raw_y = raw_y.to(device)
-            speaker_emb = torch.load(str(filename).replace(".wav", "_emb.pt"))
-            speaker_emb = speaker_emb.to(device).unsqueeze(0)
+            # speaker_emb = torch.load(str(filename).replace(".wav", "_emb.pt"))
+            # speaker_emb = speaker_emb.to(device).unsqueeze(0)
 
             offset = raw_y.shape[1] % q
             if offset:
@@ -251,7 +258,7 @@ def foo(fq: Queue, rq: Queue, q: int, infer_type: str,
                     amp.autocast()(downsampler),
                     amp.autocast()(upsampler),
                     amp.autocast()(lambda x, t: model(
-                        x, steps[t:t+1], speaker_emb)),
+                        x, steps[t:t+1])),
                     verbose=False
                 )
             elif infer_type == "nuwave-inpainting":
@@ -266,19 +273,33 @@ def foo(fq: Queue, rq: Queue, q: int, infer_type: str,
                         x, nuwave_cond, alpha[t:t+1])),
                     verbose=False
                 )
+            elif infer_type == "nuwave-manifold":
+                y_hat = upsampler(y_lowpass)
+                nuwave_cond = F.upsample(y_lowpass.unsqueeze(
+                    1), scale_factor=q, mode='linear', align_corners=False).squeeze(1)
+                y_recon = reverse_manifold(
+                    y_hat, gamma,
+                    amp.autocast()(downsampler),
+                    amp.autocast()(upsampler),
+                    amp.autocast()(lambda x, t, idx: model(
+                        x, nuwave_cond[:, idx], alpha[t:t+1])),
+                    lr=lr,
+                    verbose=False
+                )
             elif infer_type == "manifold":
                 y_hat = upsampler(y_lowpass)
                 y_recon = reverse_manifold(
                     y_hat, gamma,
                     amp.autocast()(downsampler),
                     amp.autocast()(upsampler),
-                    amp.autocast()(lambda x, t: model(
-                        x, steps[t:t+1], speaker_emb)),
+                    amp.autocast()(lambda x, t, idx: model(
+                        x, steps[t:t+1])),
+                    lr=lr,
                     verbose=False
                 )
             else:
                 raise ValueError(
-                    "infer_type must be one of nuwave, inpainting, nuwave-inpainting")
+                    "infer_type must be one of nuwave, inpainting, nuwave-inpainting, manifold")
 
             if offset:
                 y_recon = torch.cat(
@@ -302,9 +323,11 @@ if __name__ == '__main__':
     parser.add_argument('--rate', type=int, default=2)
     parser.add_argument('-T', type=int, default=50)
     parser.add_argument('--infer-type', type=str,
-                        choices=['inpainting', 'nuwave', 'nuwave-inpainting', 'manifold'], default='inpainting')
+                        choices=['inpainting', 'nuwave', 'nuwave-inpainting', 'manifold', 'nuwave-manifold'], default='inpainting')
     parser.add_argument('--downsample-type', type=str,
                         choices=['sinc', 'stft'], default='stft')
+    parser.add_argument('--lr', type=float, default=1.,
+                        help="learning rate for manifold")
 
     args = parser.parse_args()
 
@@ -371,7 +394,7 @@ if __name__ == '__main__':
         upsampler = Upsample(**sinc_kwargs)
 
         p = Process(target=foo, args=(
-            file_q, result_q, args.rate, args.infer_type,
+            file_q, result_q, args.rate, args.infer_type, args.lr,
             deepcopy(model).to(device), evaluater.to(device), downsampler.to(
                 device), upsampler.to(device), gamma.to(device), steps.to(device)))
         processes.append(p)
@@ -397,6 +420,8 @@ if __name__ == '__main__':
             filename, lsd = result_q.get()
             if isinstance(lsd, Exception):
                 print(f'catch exception: {lsd}')
+                for p in processes:
+                    p.terminate()
                 break
             pbar.set_postfix(lsd=lsd)
             pbar.update(1)
